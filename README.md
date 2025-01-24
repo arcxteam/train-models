@@ -8,7 +8,7 @@
 
 ## Allora Model Forge
 
-Let’s forge the future together. [Apply & Eligible Dahsboard](https://forge.allora.network)
+Let’s forge the future together. [Connect Wallet -> Apply -> Eligible Dahsboard](https://forge.allora.network)
 
 > The Allora Model Forge is the hub for monetization of machine learning models. Compete alongside top talent in AI, create models with real impact, and earn rewards & recognition within the Allora ecosystem and beyond.
 
@@ -21,7 +21,7 @@ Let’s forge the future together. [Apply & Eligible Dahsboard](https://forge.al
 ![image](https://github.com/user-attachments/assets/5e7df15b-afcc-46a5-9031-a404b22c2d7b)
 
 
-## 1. Cloning code from this repository
+## 1. Cloning this repository
 
 ```bash
 git clone https://github.com/arcxteam/allora-cpu.git
