@@ -28,7 +28,7 @@ services:
 
   reputer-01:
     container_name: reputer-01
-    image: alloranetwork/allora-offchain-node:v0.7.0
+    image: alloranetwork/allora-offchain-node:v0.8.1
     volumes:
       - ./worker-01-data:/data
     depends_on:
