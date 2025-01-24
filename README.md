@@ -1,10 +1,20 @@
-## Allora Worker x Reputer for (Allora Model Forge Competition)
+# Allora Worker x Reputer for (Allora Model Forge Competition)
 
 > [!NOTE]
 > **THIS END Following ANN** the competition run worker in here [Dashboard](https://app.allora.network?ref=eyJyZWZlcnJlcl9pZCI6IjhmZmQ5YTMwLWZhYmMtNDJjYy05NmNiLWZmMTYxOWE3ZDI0NyJ9) has ENDED. Earn Points Participants can earn Allora Points through a variety of on-chain and off-chain activities
 
 
 ![Confirm](https://img.shields.io/badge/WHATS_THE_NEXT-ALLORA_FORGE_ONGOING-brightgreen)
+
+## Allora Model Forge
+
+Let’s forge the future together. [Apply & Eligible Dahsboard](https://forge.allora.network)
+
+> The Allora Model Forge is the hub for monetization of machine learning models. Compete alongside top talent in AI, create models with real impact, and earn rewards & recognition within the Allora ecosystem and beyond.
+
+- ⚒️ 12h ETH/USD Volatility Prediction
+- ⚒️ 12h ETH/USDC Volume Prediction
+- ⚒️ 5 min ETH/USD Price Prediction
 
 ![image](https://github.com/user-attachments/assets/27e75675-83dd-4bfc-ac0c-ec0be6d1ed9f)
 
