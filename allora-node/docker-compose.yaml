@@ -96,7 +96,7 @@ services:
 
   allora-worker:
     container_name: allora-worker
-    image: alloranetwork/allora-offchain-node:v0.7.0
+    image: alloranetwork/allora-offchain-node:v0.8.1
     volumes:
       - ./worker-data:/data
     depends_on:
