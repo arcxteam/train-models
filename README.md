@@ -1,4 +1,12 @@
-## Allora Worker x Reputer as modify with compatible CPU mode, but you can setup with your handle!!! 
+## Allora Worker x Reputer for Own Model (Allora Model Forge Competition)
+
+> [!NOTE]
+> **THIS END** Following ann, the competition run worker in here [Dashboard](https://app.allora.network?ref=eyJyZWZlcnJlcl9pZCI6IjhmZmQ5YTMwLWZhYmMtNDJjYy05NmNiLWZmMTYxOWE3ZDI0NyJ9) has END. Earn Points Participants can earn Allora Points through a variety of on-chain and off-chain activities
+
+![image](https://github.com/user-attachments/assets/27e75675-83dd-4bfc-ac0c-ec0be6d1ed9f)
+
+![image](https://github.com/user-attachments/assets/5e7df15b-afcc-46a5-9031-a404b22c2d7b)
+
 
 ## 1. Cloning code from this repository
 
