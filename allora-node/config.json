@@ -18,7 +18,7 @@
     },
     "worker": [
         {
-            "topicId": 1,
+            "topicId": 30,
             "inferenceEntrypointName": "apiAdapter",
             "loopSeconds": 5,
             "parameters": {
@@ -27,63 +27,27 @@
             }
         },
         {
-            "topicId": 3,
+            "topicId": 29,
             "inferenceEntrypointName": "apiAdapter",
             "loopSeconds": 5,
             "parameters": {
                 "InferenceEndpoint": "http://source-01:8001/inference/{Token}",
-                "Token": "BTC"
+                "Token": "ETH"
             }
         },
         {
-            "topicId": 5,
+            "topicId": 28,
             "inferenceEntrypointName": "apiAdapter",
             "loopSeconds": 5,
             "parameters": {
                 "InferenceEndpoint": "http://source-01:8001/inference/{Token}",
-                "Token": "SOL"
-            }
-        },
-        {
-            "topicId": 2,
-            "inferenceEntrypointName": "apiAdapter",
-            "loopSeconds": 5,
-            "parameters": {
-                "InferenceEndpoint": "http://source-03:8003/inference/{Token}",
                 "Token": "ETH"
-            }
-        },
-        {
-            "topicId": 7,
-            "inferenceEntrypointName": "apiAdapter",
-            "loopSeconds": 5,
-            "parameters": {
-                "InferenceEndpoint": "http://source-02:8002/inference/{Token}",
-                "Token": "ETH"
-            }
-        },
-        {
-            "topicId": 8,
-            "inferenceEntrypointName": "apiAdapter",
-            "loopSeconds": 5,
-            "parameters": {
-                "InferenceEndpoint": "http://source-02:8002/inference/{Token}",
-                "Token": "BNB"
-            }
-        },
-        {
-            "topicId": 9,
-            "inferenceEntrypointName": "apiAdapter",
-            "loopSeconds": 5,
-            "parameters": {
-                "InferenceEndpoint": "http://source-02:8002/inference/{Token}",
-                "Token": "ARB"
             }
         }
     ],
     "reputer": [
         {
-            "topicId": 1,
+            "topicId": 30,
             "reputerEntrypointName": "apiAdapter",
             "loopSeconds": 30,
             "minStake": 100000,
@@ -93,63 +57,23 @@
             }
         },
         {
-            "topicId": 3,
+            "topicId": 29,
             "reputerEntrypointName": "apiAdapter",
             "loopSeconds": 30,
             "minStake": 100000,
             "parameters": {
                 "SourceOfTruthEndpoint": "http://source-01:8001/truth/{Token}/{BlockHeight}",
-                "Token": "BTCUSD"
+                "Token": "ETHUSD"
             }
         },
         {
-            "topicId": 5,
+            "topicId": 28,
             "reputerEntrypointName": "apiAdapter",
             "loopSeconds": 30,
             "minStake": 100000,
             "parameters": {
                 "SourceOfTruthEndpoint": "http://source-01:8001/truth/{Token}/{BlockHeight}",
-                "Token": "SOLUSD"
-            }
-        },
-        {
-            "topicId": 2,
-            "reputerEntrypointName": "apiAdapter",
-            "loopSeconds": 30,
-            "minStake": 100000,
-            "parameters": {
-                "SourceOfTruthEndpoint": "http://source-03:8003/truth/{Token}/{BlockHeight}",
                 "Token": "ETHUSD"
-            }
-        },
-        {
-            "topicId": 7,
-            "reputerEntrypointName": "apiAdapter",
-            "loopSeconds": 30,
-            "minStake": 100000,
-            "parameters": {
-                "SourceOfTruthEndpoint": "http://source-02:8002/truth/{Token}/{BlockHeight}",
-                "Token": "ETHUSD"
-            }
-        },
-        {
-            "topicId": 8,
-            "reputerEntrypointName": "apiAdapter",
-            "loopSeconds": 30,
-            "minStake": 100000,
-            "parameters": {
-                "SourceOfTruthEndpoint": "http://source-02:8002/truth/{Token}/{BlockHeight}",
-                "Token": "BNBUSD"
-            }
-        },
-        {
-            "topicId": 9,
-            "reputerEntrypointName": "apiAdapter",
-            "loopSeconds": 30,
-            "minStake": 100000,
-            "parameters": {
-                "SourceOfTruthEndpoint": "http://source-02:8002/truth/{Token}/{BlockHeight}",
-                "Token": "ARBUSD"
             }
         }
     ]
