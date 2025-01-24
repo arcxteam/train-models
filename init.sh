@@ -4,9 +4,9 @@ sudo apt-get update && apt-get -y install jq
 
 if command -v docker &> /dev/null
 then
-    echo "Docker đã được cài đặt."
+    echo "Docker already install."
 else
-    echo "Docker chưa được cài đặt. Đang tiến hành cài đặt Docker..."
+    echo "Not have Docker, Installing now..."
 
     sudo apt-get update &&
     sudo apt-get -y install ca-certificates curl gnupg &&
@@ -23,5 +23,5 @@ else
     sudo usermod -aG docker $USER &&
     newgrp docker
 
-    echo "Đã cài đặt Docker thành công."
+    echo "Succesfull Instaling Docker."
 fi
