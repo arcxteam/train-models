@@ -1,7 +1,9 @@
 ## Allora Worker x Reputer for Own Model (Allora Model Forge Competition)
 
 > [!NOTE]
-> **THIS END** Following ann, the competition run worker in here [Dashboard](https://app.allora.network?ref=eyJyZWZlcnJlcl9pZCI6IjhmZmQ5YTMwLWZhYmMtNDJjYy05NmNiLWZmMTYxOWE3ZDI0NyJ9) has END. Earn Points Participants can earn Allora Points through a variety of on-chain and off-chain activities
+> **THIS END Following ANN** the competition run worker in here [Dashboard](https://app.allora.network?ref=eyJyZWZlcnJlcl9pZCI6IjhmZmQ5YTMwLWZhYmMtNDJjYy05NmNiLWZmMTYxOWE3ZDI0NyJ9) has ENDED. Earn Points Participants can earn Allora Points through a variety of on-chain and off-chain activities
+
+![Confirm](https://img.shields.io/badge/WHATS-THE-NEXT-ALLORA_FORGE_ONGOING-brightgreen)** 
 
 ![image](https://github.com/user-attachments/assets/27e75675-83dd-4bfc-ac0c-ec0be6d1ed9f)
 
