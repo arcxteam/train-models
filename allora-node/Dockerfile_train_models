@@ -12,20 +12,23 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     git \
     wget \
+		libfreetype6-dev \
+    libpng-dev \
+    libjpeg-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the requirements.txt file
 COPY requirements.txt .
 
-# Install Python dependencies
+# Install Python dependencies WITH cache for faster rebuilds
 RUN pip install --upgrade pip setuptools \
-    && pip install --timeout=360 --no-cache-dir -r requirements.txt
+    && pip install --timeout=360 -r requirements.txt
 
-# Install TensorFlow CPU version
-RUN pip install --no-cache-dir tensorflow-cpu==2.13.0
+# Install TensorFlow CPU version WITH cache
+RUN pip install tensorflow-cpu==2.13.0
 
-# Ensure XGBoost is installed
-RUN pip install --no-cache-dir xgboost==1.7.6
+# Ensure XGBoost is installed WITH cache
+RUN pip install xgboost==1.7.6
 
 # Enable multi-threading for CPU optimization
 # These control how many CPU cores are used by numerical libraries
