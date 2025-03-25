@@ -1,80 +1,75 @@
 {
-    "wallet": {
-        "addressKeyName": "bangsat-kau-wkwkwk",
-        "addressRestoreMnemonic": "what-the-fuck",
-        "alloraHomeDir": "",
-        "gas": "auto",
-        "gasAdjustment": 2,
-        "gasPrices": "auto",
-        "gasPriceUpdateInterval": 60,
-        "maxFees": 500000,
-        "nodeRpc": "https://allora-rpc.testnet.allora.network",
-        "maxRetries": 7,
-        "retryDelay": 3,
-        "accountSequenceRetryDelay": 5,
-        "submitTx": true,
-        "blockDurationEstimated": 10,
-        "windowCorrectionFactor": 0.8
-    },
-    "worker": [
-        {
-            "topicId": 30,
-            "inferenceEntrypointName": "apiAdapter",
-            "loopSeconds": 5,
-            "parameters": {
-                "InferenceEndpoint": "http://source-01:8001/inference/{Token}",
-                "Token": "ETH"
-            }
-        },
-        {
-            "topicId": 29,
-            "inferenceEntrypointName": "apiAdapter",
-            "loopSeconds": 5,
-            "parameters": {
-                "InferenceEndpoint": "http://source-01:8001/inference/{Token}",
-                "Token": "ETH"
-            }
-        },
-        {
-            "topicId": 28,
-            "inferenceEntrypointName": "apiAdapter",
-            "loopSeconds": 5,
-            "parameters": {
-                "InferenceEndpoint": "http://source-01:8001/inference/{Token}",
-                "Token": "ETH"
-            }
-        }
+  "wallet": {
+    "chainId": "allora-testnet-1",
+    "addressKeyName": "",
+    "addressRestoreMnemonic": "Bangsat69",
+    "alloraHomeDir": "",
+    "gasPrices": "100",
+    "gasPriceUpdateInterval": 5,
+    "gasAdjustment": 1.2,
+    "simulateGasFromStart": true,
+    "GasPerByte": 1,
+    "BaseGas": 200000,
+    "maxFees": 300000000,
+    "nodeRpcs": [
+      "https://allora-rpc.testnet.allora.network/"
     ],
-    "reputer": [
-        {
-            "topicId": 30,
-            "reputerEntrypointName": "apiAdapter",
-            "loopSeconds": 30,
-            "minStake": 100000,
-            "parameters": {
-                "SourceOfTruthEndpoint": "http://source-01:8001/truth/{Token}/{BlockHeight}",
-                "Token": "ETHUSD"
-            }
-        },
-        {
-            "topicId": 29,
-            "reputerEntrypointName": "apiAdapter",
-            "loopSeconds": 30,
-            "minStake": 100000,
-            "parameters": {
-                "SourceOfTruthEndpoint": "http://source-01:8001/truth/{Token}/{BlockHeight}",
-                "Token": "ETHUSD"
-            }
-        },
-        {
-            "topicId": 28,
-            "reputerEntrypointName": "apiAdapter",
-            "loopSeconds": 30,
-            "minStake": 100000,
-            "parameters": {
-                "SourceOfTruthEndpoint": "http://source-01:8001/truth/{Token}/{BlockHeight}",
-                "Token": "ETHUSD"
-            }
-        }
-    ]
+    "nodegRpcs": [
+      "allora-grpc.testnet.allora.network:443",
+      "testnet-allora.lavenderfive.com:443"
+    ],
+    "maxRetries": 8,
+    "retryDelay": 3,
+    "accountSequenceRetryDelay": 5,
+    "launchRoutineDelay": 5,
+    "submitTx": true,
+    "blockDurationEstimated": 5,
+    "windowCorrectionFactor": 0.8,
+    "timeoutRPCSecondsQuery": 60,
+    "timeoutRPCSecondsTx": 300,
+    "timeoutRPCSecondsRegistration": 300,
+    "timeoutHTTPConnection": 10
+  },
+  "worker": [
+    {
+      "topicId": 37,
+      "inferenceEntrypointName": "apiAdapter",
+      "loopSeconds": 5,
+      "parameters": {
+        "InferenceEndpoint": "http://inference:8000/predict_price/{Token}",
+        "Token": "SOL"
+      }
+    },
+    {
+      "topicId": 46,
+      "inferenceEntrypointName": "apiAdapter",
+      "loopSeconds": 360,
+      "parameters": {
+        "InferenceEndpoint": "http://inference:8000/predict_price/{Token}",
+        "Token": "ETH"
+      }
+    }
+  ],
+  "reputer": [
+    {
+      "topicId": 37,
+      "reputerEntrypointName": "apiAdapter",
+      "loopSeconds": 30,
+      "minStake": 100000,
+      "parameters": {
+        "SourceOfTruthEndpoint": "http://inference:8000/truth/{Token}/{BlockHeight}",
+        "Token": "SOLUSD"
+      }
+    },
+    {
+      "topicId": 46,
+      "reputerEntrypointName": "apiAdapter",
+      "loopSeconds": 30,
+      "minStake": 100000,
+      "parameters": {
+        "SourceOfTruthEndpoint": "http://inference:8000/truth/{Token}/{BlockHeight}",
+        "Token": "ETHUSD"
+      }
+    }
+  ]
 }
