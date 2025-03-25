@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     git \
     wget \
+    curl \
     libfreetype6-dev \
     libpng-dev \
     libjpeg-dev \
