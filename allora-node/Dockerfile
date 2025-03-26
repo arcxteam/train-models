@@ -10,7 +10,7 @@ RUN pip install --upgrade pip setuptools \
     && pip install --timeout=360 -r requirements.txt
 
 # Install TensorFlow with CPU support
-RUN pip install --no-cache-dir tensorflow-cpu==2.13.0
+RUN pip install tensorflow-cpu==2.13.0
 
 # Second stage for cleaner image
 FROM project_env
