@@ -9,7 +9,7 @@ services:
       - TOKENS=ETH:ethereum,SOL:solana
       - ALLORA_VALIDATOR_API_URL=https://allora-api.testnet.allora.network/
       - DATABASE_PATH=/app/data/prices.db
-      - CGC_API_KEY=your_cgc_api_key
+      - CGC_API_KEY=CG-xxxxxxxxx
     volumes:
       - ./source-data:/app/data
     restart: unless-stopped
@@ -27,16 +27,11 @@ services:
       - PREDICTION_STEPS=5
     ports:
       - "8001:8001"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
+    # Delete Health check
     command: >
-      sh -c "python init_data.py && gunicorn --preload --bind 0.0.0.0:8001 --log-level info --error-logfile - --access-logfile - 
-      --worker-tmp-dir /dev/shm --graceful-timeout 120 --timeout 30 --keep-alive 5 
-      --worker-class gthread --workers 4 --threads 7 app:app"
+      sh -c "python init_data.py && gunicorn --preload --bind 0.0.0.0:8001 --log-level info --error-logfile - --access-logfile -
+      --worker-tmp-dir /dev/shm --graceful-timeout 120 --timeout 30 --keep-alive 5
+      --worker-class gthread --workers 2 --threads 6 app:app"
     volumes:
       - ./source-data:/app/data
       - ./models:/app/models
@@ -55,16 +50,11 @@ services:
       - PREDICTION_STEPS=360
     ports:
       - "8002:8002"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
+    # Delete Health check
     command: >
-      sh -c "python init_data.py && gunicorn --preload --bind 0.0.0.0:8002 --log-level info --error-logfile - --access-logfile - 
-      --worker-tmp-dir /dev/shm --graceful-timeout 120 --timeout 30 --keep-alive 5 
-      --worker-class gthread --workers 4 --threads 7 app:app"
+      sh -c "python init_data.py && gunicorn --preload --bind 0.0.0.0:8002 --log-level info --error-logfile - --access-logfile -
+      --worker-tmp-dir /dev/shm --graceful-timeout 120 --timeout 30 --keep-alive 5
+      --worker-class gthread --workers 2 --threads 6 app:app"
     volumes:
       - ./source-data:/app/data
       - ./models:/app/models
@@ -76,10 +66,8 @@ services:
     volumes:
       - ./worker-data:/data
     depends_on:
-      source-01:
-        condition: service_healthy
-      source-02:
-        condition: service_healthy
+      - source-01
+      - source-02
     env_file:
       - ./worker-data/env_file
     restart: unless-stopped
