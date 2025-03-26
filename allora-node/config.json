@@ -1,23 +1,19 @@
 {
   "wallet": {
     "chainId": "allora-testnet-1",
+    "keyringBackend": "test",
     "addressKeyName": "",
-    "addressRestoreMnemonic": "Bangsat69",
+    "addressRestoreMnemonic": "",
     "alloraHomeDir": "",
-    "gasPrices": "100",
+    "gasPrices": "auto",
     "gasPriceUpdateInterval": 5,
     "gasAdjustment": 1.2,
     "simulateGasFromStart": true,
     "GasPerByte": 1,
     "BaseGas": 200000,
     "maxFees": 300000000,
-    "nodeRpcs": [
-      "https://allora-rpc.testnet.allora.network/"
-    ],
-    "nodegRpcs": [
-      "allora-grpc.testnet.allora.network:443",
-      "testnet-allora.lavenderfive.com:443"
-    ],
+    "nodeRpcs": ["https://allora-rpc.testnet.allora.network"],
+    "nodegRpcs": ["allora-grpc.testnet.allora.network:443","testnet-allora.lavenderfive.com:443"],
     "maxRetries": 8,
     "retryDelay": 3,
     "accountSequenceRetryDelay": 5,
@@ -36,39 +32,17 @@
       "inferenceEntrypointName": "apiAdapter",
       "loopSeconds": 5,
       "parameters": {
-        "InferenceEndpoint": "http://inference:8000/predict_price/{Token}",
+        "InferenceEndpoint": "http://source-01:8001/predict_price/{Token}",
         "Token": "SOL"
-      }
+      } 
     },
     {
       "topicId": 46,
       "inferenceEntrypointName": "apiAdapter",
       "loopSeconds": 360,
       "parameters": {
-        "InferenceEndpoint": "http://inference:8000/predict_price/{Token}",
+        "InferenceEndpoint": "http://source-02:8002/predict_price/{Token}",
         "Token": "ETH"
-      }
-    }
-  ],
-  "reputer": [
-    {
-      "topicId": 37,
-      "reputerEntrypointName": "apiAdapter",
-      "loopSeconds": 30,
-      "minStake": 100000,
-      "parameters": {
-        "SourceOfTruthEndpoint": "http://inference:8000/truth/{Token}/{BlockHeight}",
-        "Token": "SOLUSD"
-      }
-    },
-    {
-      "topicId": 46,
-      "reputerEntrypointName": "apiAdapter",
-      "loopSeconds": 30,
-      "minStake": 100000,
-      "parameters": {
-        "SourceOfTruthEndpoint": "http://inference:8000/truth/{Token}/{BlockHeight}",
-        "Token": "ETHUSD"
       }
     }
   ]
