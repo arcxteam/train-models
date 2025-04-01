@@ -13,7 +13,7 @@
     "BaseGas": 200000,
     "maxFees": 300000000,
     "nodeRpcs": ["https://allora-rpc.testnet.allora.network"],
-    "nodegRpcs": ["allora-grpc.testnet.allora.network:443","testnet-allora.lavenderfive.com:443"],
+    "nodegRpcs": ["allora-grpc.testnet.allora.network:443", "testnet-allora.lavenderfive.com:443"],
     "maxRetries": 8,
     "retryDelay": 3,
     "accountSequenceRetryDelay": 5,
@@ -28,16 +28,16 @@
   },
   "worker": [
     {
-      "topicId": 37,
+      "topicId": 56,
       "inferenceEntrypointName": "apiAdapter",
-      "loopSeconds": 5,
+      "loopSeconds": 60,
       "parameters": {
         "InferenceEndpoint": "http://source-01:8001/predict_price/{Token}",
-        "Token": "SOL"
+        "Token": "BERA"
       } 
     },
     {
-      "topicId": 46,
+      "topicId": 52,
       "inferenceEntrypointName": "apiAdapter",
       "loopSeconds": 360,
       "parameters": {
