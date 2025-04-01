@@ -6,7 +6,7 @@ services:
       dockerfile: Dockerfile_updater
     entrypoint: ["sh", "-c", "while true; do sleep 60; python -u /app/update_app.py; done"]
     environment:
-      - TOKENS=ETH:ethereum,SOL:solana
+      - TOKENS=ETH:ethereum,BERA:berachain
       - ALLORA_VALIDATOR_API_URL=https://allora-api.testnet.allora.network/
       - DATABASE_PATH=/app/data/prices.db
       - CGC_API_KEY=CG-xxxxxxxxx
@@ -21,10 +21,10 @@ services:
       - DATABASE_PATH=/app/data/prices.db
       - API_PORT=8001
       - ALLORA_VALIDATOR_API_URL=https://allora-api.testnet.allora.network/
-      - TOKENS=SOL:solana
-      - INTERVAL_STEPS=5
-      - LOOK_BACK=15
-      - PREDICTION_STEPS=5
+      - TOKENS=BERA:berachain
+      - INTERVAL_STEPS=60
+      - LOOK_BACK=60
+      - PREDICTION_STEPS=60
     ports:
       - "8001:8001"
     # Delete Health check
@@ -46,7 +46,7 @@ services:
       - ALLORA_VALIDATOR_API_URL=https://allora-api.testnet.allora.network/
       - TOKENS=ETH:ethereum
       - INTERVAL_STEPS=360
-      - LOOK_BACK=48
+      - LOOK_BACK=72
       - PREDICTION_STEPS=360
     ports:
       - "8002:8002"
