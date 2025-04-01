@@ -25,31 +25,31 @@ services:
     environment:
       - DATA_PROVIDER_API_ADDRESS=http://truth-01-eth:8001
 
-  truth-02-sol:
-    container_name: truth-02-sol
+  truth-02-bera:
+    container_name: truth-02-bera
     build: .
     environment:
       - DATABASE_PATH=/app/data/prices.db
       - API_PORT=8002
       - ALLORA_VALIDATOR_API_URL=https://allora-api.testnet.allora.network/
-      - TOKEN=SOL
-      - TOKEN_CG_ID=solana
+      - TOKEN=BERA
+      - TOKEN_CG_ID=berachain
       - WORKER_TYPE=1
       - CGC_API_KEY=your_cgc_api_key
     ports:
       - "8002:8002"
     volumes:
-      - ./truth-02-data/sol-data:/app/data
+      - ./truth-02-data/bera-data:/app/data
 
-  updater-02-sol:
-    container_name: updater-02-sol
+  updater-02-bera:
+    container_name: updater-02-bera
     build:
       context: .
       dockerfile: Dockerfile_updater
     depends_on:
-      - truth-02-sol
+      - truth-02-bera
     environment:
-      - DATA_PROVIDER_API_ADDRESS=http://truth-02-sol:8002
+      - DATA_PROVIDER_API_ADDRESS=http://truth-02-bera:8002
 
   reputer-01:
     container_name: reputer-01
@@ -58,6 +58,6 @@ services:
       - ./worker-01-data:/data
     depends_on:
       - truth-01-eth
-      - truth-02-sol
+      - truth-02-bera
     env_file:
       - ./worker-01-data/env_file
