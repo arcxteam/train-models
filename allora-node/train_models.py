@@ -684,8 +684,8 @@ def train_and_save_log_return_model(token_name, look_back, prediction_horizon, h
                 'xgb__learning_rate': [0.01, 0.05, 0.1],
                 'xgb__subsample': [0.7, 0.8, 0.9],
                 'xgb__colsample_bytree': [0.7, 0.8, 0.9],
-                'xgb__min_child_weight': [1, 3, 5],
-                'xgb__gamma': [0, 0.1, 0.2]
+                'xgb__min_child_weight': [1, 2, 3],
+                'xgb__gamma': [0, 0.1]
             }
             
             # Use RandomizedSearchCV with TimeSeriesSplit
@@ -1058,8 +1058,8 @@ def train_and_save_volatility_model(token_name, look_back, prediction_horizon, h
                 'xgb__learning_rate': [0.01, 0.05, 0.1],
                 'xgb__subsample': [0.7, 0.8, 0.9],
                 'xgb__colsample_bytree': [0.7, 0.8, 0.9],
-                'xgb__min_child_weight': [1, 3, 5],
-                'xgb__gamma': [0, 0.1, 0.2]
+                'xgb__min_child_weight': [1, 2, 3],
+                'xgb__gamma': [0, 0.1]
             }
             
             # RandomizedSearchCV with TimeSeriesSplit
