@@ -617,7 +617,7 @@ def train_and_save_log_return_model(token_name, look_back, prediction_horizon, h
             # Use RandomizedSearchCV with TimeSeriesSplit
             search = RandomizedSearchCV(
                 pipeline, param_distributions=param_dist, n_iter=5, cv=tscv,
-                scoring='neg_mean_absolute_error', n_jobs=5, random_state=42, verbose=1
+                scoring='neg_mean_absolute_error', n_jobs=3, random_state=42, verbose=1
             )
             
             # Fit the model
@@ -691,7 +691,7 @@ def train_and_save_log_return_model(token_name, look_back, prediction_horizon, h
             # Use RandomizedSearchCV with TimeSeriesSplit
             search = RandomizedSearchCV(
                 pipeline, param_distributions=param_dist, n_iter=5, cv=tscv,
-                scoring='neg_mean_absolute_error', n_jobs=5, random_state=42, verbose=1
+                scoring='neg_mean_absolute_error', n_jobs=3, random_state=42, verbose=1
             )
             
             # Fit the model
@@ -997,7 +997,7 @@ def train_and_save_volatility_model(token_name, look_back, prediction_horizon, h
             # Use RandomizedSearchCV with TimeSeriesSplit
             search = RandomizedSearchCV(
                 pipeline, param_distributions=param_dist, n_iter=5, cv=tscv,
-                scoring='neg_mean_squared_error', n_jobs=5, random_state=42, verbose=1
+                scoring='neg_mean_squared_error', n_jobs=3, random_state=42, verbose=1
             )
             
             # Fit the model
@@ -1065,7 +1065,7 @@ def train_and_save_volatility_model(token_name, look_back, prediction_horizon, h
             # RandomizedSearchCV with TimeSeriesSplit
             search = RandomizedSearchCV(
                 pipeline, param_distributions=param_dist, n_iter=5, cv=tscv,
-                scoring='neg_mean_squared_error', n_jobs=5, random_state=42, verbose=1
+                scoring='neg_mean_squared_error', n_jobs=3, random_state=42, verbose=1
             )
             
             # Fit the model
