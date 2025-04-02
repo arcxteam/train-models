@@ -5,7 +5,7 @@
     "addressKeyName": "",
     "addressRestoreMnemonic": "",
     "alloraHomeDir": "",
-    "gasPrices": "auto",
+    "gasPrices": "200",
     "gasPriceUpdateInterval": 5,
     "gasAdjustment": 1.2,
     "simulateGasFromStart": true,
