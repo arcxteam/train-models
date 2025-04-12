@@ -1,4 +1,5 @@
 import numpy as np
+import sqlite3
 import os
 import joblib
 import pandas as pd
@@ -31,13 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Import app_config for paths
-try:
-    from app_config import DATA_BASE_PATH, TIINGO_CACHE_DIR
-except ImportError:
-    logger.warning("Failed to import from app_config. Setting default paths.")
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    DATA_BASE_PATH = os.path.join(BASE_DIR, 'data')
-    TIINGO_CACHE_DIR = os.path.join(DATA_BASE_PATH, 'tiingo_cache')
+from app_config import DATABASE_PATH, DATA_BASE_PATH, TIINGO_CACHE_DIR, OKX_CACHE_DIR
 
 # Base directories
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -45,8 +40,8 @@ MODELS_DIR = os.path.join(BASE_DIR, 'models')
 
 # Ensure the models directory exists
 os.makedirs(MODELS_DIR, exist_ok=True)
-os.makedirs(TIINGO_CACHE_DIR, exist_ok=True)
 
+# Function to load data from Tiingo cache
 def load_data_from_tiingo_cache(token_name, cache_dir=TIINGO_CACHE_DIR):
     """
     Memuat data OHLCV dari file cache Tiingo JSON
@@ -56,7 +51,7 @@ def load_data_from_tiingo_cache(token_name, cache_dir=TIINGO_CACHE_DIR):
         cache_dir (str): Direktori cache Tiingo
         
     Returns:
-        pd.DataFrame: DataFrame dengan data OHLCV atau None jika gagal
+        pd.DataFrame: DataFrame dengan data OHLCV
     """
     # Pastikan token_name tidak memiliki duplikat 'usd'
     base_ticker = token_name.replace('usd', '').lower()
@@ -106,9 +101,145 @@ def load_data_from_tiingo_cache(token_name, cache_dir=TIINGO_CACHE_DIR):
         logger.error(traceback.format_exc())
         return None
 
+# Function to load data from OKX cache
+def load_data_from_okx_cache(token_name, cache_dir=OKX_CACHE_DIR):
+    """
+    Memuat data OHLCV dari file cache OKX CSV
+    
+    Args:
+        token_name (str): Nama token (misalnya 'berausd')
+        cache_dir (str): Direktori cache OKX
+        
+    Returns:
+        pd.DataFrame: DataFrame dengan data OHLCV
+    """
+    # Format nama file cache OKX
+    symbol = "BERA_USDT"  # Default untuk BERA
+    if token_name.lower() != 'berausd':
+        # Jika bukan BERA, format sesuai dengan token
+        symbol = f"{token_name.replace('usd', '').upper()}_USDT"
+    
+    # Cari file cache yang paling baru
+    current_date = datetime.now()
+    dates_to_try = [
+        current_date,
+        current_date - timedelta(days=1),
+        current_date - timedelta(days=2)
+    ]
+    
+    cache_path = None
+    for date in dates_to_try:
+        date_str = date.strftime("%Y%m%d")
+        possible_path = os.path.join(cache_dir, f"{symbol}_1m_{date_str}.csv")
+        if os.path.exists(possible_path):
+            cache_path = possible_path
+            break
+    
+    if cache_path is None:
+        logger.error(f"OKX cache file not found for {token_name}")
+        return None
+        
+    try:
+        # Baca file CSV
+        df = pd.read_csv(cache_path)
+        
+        logger.info(f"Loaded data from OKX cache file: {cache_path}")
+        
+        # Memastikan data diurutkan berdasarkan timestamp
+        if 'timestamp' in df.columns:
+            df = df.sort_values('timestamp').reset_index(drop=True)
+        
+        # Pastikan semua kolom yang diperlukan ada
+        required_columns = ['price', 'open', 'high', 'low', 'volume']
+        for col in required_columns:
+            if col not in df.columns:
+                if col == 'price' and 'close' in df.columns:
+                    df['price'] = df['close']
+                elif col != 'price' and 'price' in df.columns:
+                    df[col] = df['price']
+                elif col == 'volume' and col not in df.columns:
+                    df[col] = 0.0
+        
+        logger.info(f"Loaded {len(df)} records from OKX cache for {token_name}")
+        return df
+        
+    except Exception as e:
+        logger.error(f"Error loading OKX cache data: {e}")
+        logger.error(traceback.format_exc())
+        return None
+
+# Fetch data from the database (keeping for compatibility)
+def load_data_from_db(token_name, hours_back=None):
+    try:
+        with sqlite3.connect(DATABASE_PATH) as conn:
+            cursor = conn.cursor()
+            
+            # Check if OHLCV columns exist
+            cursor.execute("PRAGMA table_info(prices)")
+            columns = [col[1] for col in cursor.fetchall()]
+            has_ohlcv = all(col in columns for col in ['open', 'high', 'low', 'volume'])
+            
+            if has_ohlcv:
+                # Use OHLCV format
+                if hours_back:
+                    query = """
+                        SELECT price, open, high, low, volume, timestamp FROM prices 
+                        WHERE token=? AND timestamp >= (SELECT MAX(timestamp) FROM prices WHERE token=?) - ? * 3600
+                        ORDER BY block_height ASC
+                    """
+                    cursor.execute(query, (token_name.lower(), token_name.lower(), hours_back))
+                else:
+                    query = """
+                        SELECT price, open, high, low, volume, timestamp FROM prices 
+                        WHERE token=?
+                        ORDER BY block_height ASC
+                    """
+                    cursor.execute(query, (token_name.lower(),))
+                    
+                result = cursor.fetchall()
+                
+                if result:
+                    # Create DataFrame with OHLCV data
+                    df = pd.DataFrame(result, columns=['price', 'open', 'high', 'low', 'volume', 'timestamp'])
+                    logger.info(f"Loaded {len(df)} OHLCV data points from database for {token_name}")
+                    return df
+            else:
+                # Original query with just price
+                if hours_back:
+                    query = """
+                        SELECT price, timestamp FROM prices 
+                        WHERE token=? AND timestamp IS NOT NULL AND timestamp >= (SELECT MAX(timestamp) FROM prices WHERE token=?) - ? * 3600
+                        ORDER BY block_height ASC
+                    """
+                    cursor.execute(query, (token_name.lower(), token_name.lower(), hours_back))
+                else:
+                    query = """
+                        SELECT price, timestamp FROM prices 
+                        WHERE token=? AND timestamp IS NOT NULL
+                        ORDER BY block_height ASC
+                    """
+                    cursor.execute(query, (token_name.lower(),))
+                    
+                result = cursor.fetchall()
+                
+                if result:
+                    # Create DataFrame with price and timestamp
+                    df = pd.DataFrame(result, columns=['price', 'timestamp'])
+                    logger.info(f"Loaded {len(df)} price data points from database for {token_name}")
+                    return df
+        
+        logger.warning(f"No data found in database for {token_name}")
+        return None
+    
+    except Exception as e:
+        logger.error(f"Error loading data from database: {e}")
+        logger.error(traceback.format_exc())
+        return None
+
+# Combined data loading function - prioritizing Tiingo and OKX
 def load_data(token_name, hours_back=None):
     """
-    Load data for the specified token from Tiingo cache
+    Load data for the specified token, prioritizing Tiingo and OKX cache
     
     Args:
         token_name (str): Token name (e.g., 'berausd')
@@ -117,13 +248,37 @@ def load_data(token_name, hours_back=None):
     Returns:
         pandas.DataFrame: DataFrame with OHLCV data
     """
-    # Load from Tiingo cache
-    logger.info(f"Loading data from Tiingo cache for {token_name}")
-    df = load_data_from_tiingo_cache(token_name)
+    # Try loading from Tiingo cache first
+    logger.info(f"Trying to load data from Tiingo cache for {token_name}")
+    df_tiingo = load_data_from_tiingo_cache(token_name)
+    
+    # Try loading from OKX cache
+    logger.info(f"Trying to load data from OKX cache for {token_name}")
+    df_okx = load_data_from_okx_cache(token_name)
+    
+    # Combine data if both sources available
+    if df_tiingo is not None and df_okx is not None:
+        # Use the one with more data
+        if len(df_tiingo) >= len(df_okx):
+            logger.info(f"Using Tiingo data with {len(df_tiingo)} records (more than OKX's {len(df_okx)})")
+            df = df_tiingo
+        else:
+            logger.info(f"Using OKX data with {len(df_okx)} records (more than Tiingo's {len(df_tiingo)})")
+            df = df_okx
+    # If only one source is available, use it
+    elif df_tiingo is not None:
+        logger.info(f"Using Tiingo data with {len(df_tiingo)} records (OKX data not available)")
+        df = df_tiingo
+    elif df_okx is not None:
+        logger.info(f"Using OKX data with {len(df_okx)} records (Tiingo data not available)")
+        df = df_okx
+    # If neither source available, try database as fallback
+    else:
+        logger.info(f"Data not found in Tiingo or OKX cache for {token_name}, trying database...")
+        df = load_data_from_db(token_name, hours_back)
     
     if df is None:
-        logger.error(f"Could not load data for {token_name} from Tiingo cache")
-        return None
+        raise ValueError(f"Could not load data for {token_name} from any source")
     
     # If hours_back is specified and we have timestamps, filter the data
     if hours_back is not None and 'timestamp' in df.columns:
@@ -135,10 +290,13 @@ def load_data(token_name, hours_back=None):
     logger.info(f"Loaded {len(df)} data points for {token_name}")
     return df
 
+#-----------------------------------------------------------------------
+# Functions for BERA Log-Return Prediction
+#-----------------------------------------------------------------------
+
 def calculate_log_returns(prices, period=60):
     """
     Calculate log returns for the given prices with specified period.
-    Formula: Log-Return = ln(new_price/current_price)
     
     Args:
         prices (numpy.array or pandas.Series): Price data
@@ -165,16 +323,14 @@ def calculate_log_returns(prices, period=60):
 def calculate_mztae(y_true, y_pred, sigma=None):
     """
     Calculate Modified Z-transformed Absolute Error.
-    Reference mean is set to 0 and reference standard deviation is calculated 
-    over a rolling window of the last 100 ground truth Log-Returns.
     
     Args:
-        y_true (numpy.array): Actual values (ground truth log returns)
-        y_pred (numpy.array): Predicted values (predicted log returns)
+        y_true (numpy.array): Actual values
+        y_pred (numpy.array): Predicted values
         sigma (float, optional): Standard deviation for normalization, if None calculated from data
         
     Returns:
-        float: MZTAE score (lower is better)
+        float: MZTAE score
     """
     # Ensure arrays are 1D
     y_true = y_true.flatten() if hasattr(y_true, 'flatten') else y_true
@@ -218,16 +374,7 @@ def calculate_mztae(y_true, y_pred, sigma=None):
     return mztae
 
 def smooth_predictions(preds, alpha=0.2):
-    """ 
-    Exponential Moving Average (EMA) smoothing for post-prediction 
-    
-    Args:
-        preds (numpy.array): Predictions to smooth
-        alpha (float): Smoothing factor (0-1)
-        
-    Returns:
-        numpy.array: Smoothed predictions
-    """
+    """ Exponential Moving Average (EMA) smoothing for post-prediction """
     smoothed = [preds[0]]
     for p in preds[1:]:
         smoothed.append(alpha * p + (1 - alpha) * smoothed[-1])
@@ -457,7 +604,7 @@ def prepare_data_for_log_return(data_df, look_back, prediction_period):
     logger.info(f"Y shape after preparation: {Y.shape}")
     logger.info(f"prev_Y shape after preparation: {prev_Y.shape}")
     
-    # Verify that X has the expected shape (samples, features) for look_back and features_list
+    # Verify that X has the expected shape (samples, 1020) for 60 timesteps and 17 features
     expected_features = look_back * len(features_list)
     if X.shape[1] != expected_features:
         logger.warning(f"X shape {X.shape[1]} doesn't match expected features {expected_features}. Training may fail.")
@@ -467,14 +614,6 @@ def prepare_data_for_log_return(data_df, look_back, prediction_period):
 def prepare_data_for_lstm(data_df, look_back, prediction_period):
     """
     Prepare data for LSTM model with proper 3D shape
-    
-    Args:
-        data_df (pandas.DataFrame): DataFrame with price and other OHLCV data
-        look_back (int): Number of data points to use for prediction
-        prediction_period (int): Prediction horizon in data points
-        
-    Returns:
-        X, Y, prev_Y, scaler: Prepared training data and scaler
     """
     logger.info(f"Preparing data for LSTM with look_back={look_back}, prediction_period={prediction_period}")
     
@@ -888,7 +1027,7 @@ def train_and_save_lstm_model(token_name, X_train, Y_train, X_test, Y_test, prev
 def train_log_return_models(token_name, look_back, prediction_horizon, hours_data=None):
     """
     Wrapper function to train all model types for log-return prediction
-    Uses data from Tiingo cache for better robustness
+    Uses data from Tiingo and OKX cache for better robustness
     
     Args:
         token_name (str): Token name (e.g., 'berausd')
@@ -902,13 +1041,9 @@ def train_log_return_models(token_name, look_back, prediction_horizon, hours_dat
     try:
         logger.info(f"Training Log-Return models for {token_name} with {prediction_horizon}-minute horizon")
         
-        # Load data from Tiingo cache
+        # Load data from the best available source (Tiingo, OKX, or DB)
         data_df = load_data(token_name, hours_data)
         
-        if data_df is None:
-            logger.error(f"Could not load data for {token_name}")
-            return None
-            
         # Train test split for all models
         results = {}
         
@@ -961,8 +1096,7 @@ def train_log_return_models(token_name, look_back, prediction_horizon, hours_dat
         return results
     
     except Exception as e:
-        logger.error(f"Error training log-return models for {token_name}: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error training log-return models for {token_name}: {e}", exc_info=True)
         return None
 
 # Main execution
@@ -976,7 +1110,8 @@ if __name__ == "__main__":
     
     # Ensure cache directories exist
     os.makedirs(TIINGO_CACHE_DIR, exist_ok=True)
-    logger.info(f"Cache directory: Tiingo={TIINGO_CACHE_DIR}")
+    os.makedirs(OKX_CACHE_DIR, exist_ok=True)
+    logger.info(f"Cache directories: Tiingo={TIINGO_CACHE_DIR}, OKX={OKX_CACHE_DIR}")
     
     # Train models for BERA/USD Log-Return with 1-hour horizon
     token_name = "berausd"
