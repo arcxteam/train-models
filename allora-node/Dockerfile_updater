@@ -7,11 +7,16 @@ WORKDIR /app
 # Install dependencies
 COPY updater-requirements.txt updater-requirements.txt
 RUN pip install --upgrade pip setuptools \
-    && pip install --timeout=360 -r updater-requirements.txt
+    && pip install --timeout=360 -r updater-requirements.txt \
+    && pip install ccxt pandas numpy retrying requests
 
 FROM project_env
 
+# Copy application files
 COPY update_app.py app_config.py app_utils.py /app/
 
-# Set the entrypoint command
-ENTRYPOINT ["sh", "-c", "while true; sleep 60; do python -u /app/update_app.py; done"]
+# Create necessary cache directories
+RUN mkdir -p /app/data/tiingo_cache /app/data/okx_cache
+
+# Set the entrypoint command - fixed syntax issue in original
+ENTRYPOINT ["sh", "-c", "while true; do python -u /app/update_app.py; sleep 60; done"]
