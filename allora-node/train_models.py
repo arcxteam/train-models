@@ -1,13 +1,12 @@
 import numpy as np
-import sqlite3
 import os
 import joblib
 import pandas as pd
 import matplotlib.pyplot as plt
 import logging
-import zipfile
-import glob
-import requests
+import json
+import time
+import traceback
 from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split, RandomizedSearchCV, TimeSeriesSplit
@@ -19,8 +18,6 @@ from tensorflow.keras.models import Sequential, save_model
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
-import json
-import time
 
 # Configure logging
 logging.basicConfig(
@@ -28,317 +25,137 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(f'model_training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+        logging.FileHandler(f'bera_model_training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
     ]
 )
 logger = logging.getLogger(__name__)
 
 # Import app_config for paths
-from app_config import DATABASE_PATH, DATA_BASE_PATH
+try:
+    from app_config import DATA_BASE_PATH, TIINGO_CACHE_DIR
+except ImportError:
+    logger.warning("Failed to import from app_config. Setting default paths.")
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    DATA_BASE_PATH = os.path.join(BASE_DIR, 'data')
+    TIINGO_CACHE_DIR = os.path.join(DATA_BASE_PATH, 'tiingo_cache')
 
 # Base directories
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, 'models')
-BINANCE_DIR = os.path.join(DATA_BASE_PATH, 'binance', 'futures-klines')
 
 # Ensure the models directory exists
 os.makedirs(MODELS_DIR, exist_ok=True)
+os.makedirs(TIINGO_CACHE_DIR, exist_ok=True)
 
-# Function to download token data from Binance
-def download_token_data(token_name, interval="1m", months=1):
+def load_data_from_tiingo_cache(token_name, cache_dir=TIINGO_CACHE_DIR):
     """
-    Download token data from Binance for the specified months
+    Memuat data OHLCV dari file cache Tiingo JSON
     
     Args:
-        token_name (str): Token name in lowercase (e.g., 'bera', 'eth')
-        interval (str): Data interval (default: '1m' for 1 minute)
-        months (int): Number of months of data to download
+        token_name (str): Nama token (misalnya 'berausd')
+        cache_dir (str): Direktori cache Tiingo
+        
+    Returns:
+        pd.DataFrame: DataFrame dengan data OHLCV atau None jika gagal
     """
-    logger.info(f"Downloading {token_name.upper()} data for the last {months} months")
+    # Pastikan token_name tidak memiliki duplikat 'usd'
+    base_ticker = token_name.replace('usd', '').lower()
+    cache_path = os.path.join(cache_dir, f"{base_ticker}usd_1min_cache.json")
     
-    # Convert token to proper Binance format
-    binance_token = f"{token_name.upper()}USDT"
-    
-    # Create directory if not exists
-    token_dir = os.path.join(BINANCE_DIR, binance_token.lower())
-    os.makedirs(token_dir, exist_ok=True)
-    
-    # Current date
-    current_date = datetime.now()
-    
-    # Download data for the specified months
-    for i in range(months):
-        target_date = current_date - timedelta(days=30*i)
-        year = target_date.year
-        month = target_date.month
-        
-        # Base URL for Binance data
-        base_url = f"https://data.binance.vision/data/futures/um/daily/klines/{binance_token}/{interval}"
-        
-        # Download for each day of the month
-        for day in range(1, 32):
-            # Skip invalid days
-            if day > 28:
-                if month == 2 and (year % 4 != 0 or (year % 100 == 0 and year % 400 != 0)):
-                    continue  # Skip Feb 29-31 in non-leap years
-                elif month == 2 and day > 29:
-                    continue  # Skip Feb 30-31 in leap years
-                elif month in [4, 6, 9, 11] and day > 30:
-                    continue  # Skip day 31 in months with 30 days
-            
-            # URL for specific day
-            url = f"{base_url}/{binance_token}-{interval}-{year}-{month:02d}-{day:02d}.zip"
-            
-            # Target file path
-            zip_file = os.path.join(token_dir, f"{binance_token}-{interval}-{year}-{month:02d}-{day:02d}.zip")
-            
-            # Skip if already downloaded
-            if os.path.exists(zip_file):
-                continue
-            
-            try:
-                # Download file
-                response = requests.get(url)
-                if response.status_code == 200:
-                    with open(zip_file, 'wb') as f:
-                        f.write(response.content)
-                    logger.info(f"Downloaded {url}")
-                else:
-                    logger.warning(f"Failed to download {url}: {response.status_code}")
-            except Exception as e:
-                logger.error(f"Error downloading {url}: {e}")
-
-# Function to extract ZIP files
-def extract_zip_files(token_name):
-    # Convert token to proper Binance format
-    binance_token = token_name.replace('usd', 'usdt').lower()
-    token_dir = os.path.join(BINANCE_DIR, binance_token)
-    
-    if not os.path.exists(token_dir):
-        logger.warning(f"Directory not found: {token_dir}")
-        return False
-    
-    # Get all ZIP files
-    zip_files = glob.glob(os.path.join(token_dir, "*.zip"))
-    if not zip_files:
-        logger.warning(f"No ZIP files found in {token_dir}")
-        return False
-    
-    logger.info(f"Found {len(zip_files)} ZIP files for {token_name}")
-    
-    # Extract each ZIP file
-    for zip_file in zip_files:
-        csv_file = zip_file.replace('.zip', '.csv')
-        # Skip if CSV already exists
-        if os.path.exists(csv_file):
-            continue
-        
-        try:
-            with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-                # Get the first file in the ZIP (should be the CSV)
-                csv_name = zip_ref.namelist()[0]
-                # Extract to the same directory with renamed filename
-                zip_ref.extract(csv_name, token_dir)
-                # Rename to match ZIP filename but with .csv extension
-                extracted_path = os.path.join(token_dir, csv_name)
-                os.rename(extracted_path, csv_file)
-                logger.info(f"Extracted: {zip_file} to {csv_file}")
-        except Exception as e:
-            logger.error(f"Error extracting {zip_file}: {e}")
-    
-    return True
-
-# Combine all extracted CSVs for a token
-def combine_csv_files(token_name):
-    # Convert token to proper Binance format
-    binance_token = token_name.replace('usd', 'usdt').lower()
-    token_dir = os.path.join(BINANCE_DIR, binance_token)
-    
-    if not os.path.exists(token_dir):
-        logger.warning(f"Directory not found: {token_dir}")
+    if not os.path.exists(cache_path):
+        logger.error(f"Cache file not found: {cache_path}")
         return None
-    
-    # Get all CSV files
-    csv_files = glob.glob(os.path.join(token_dir, "*.csv"))
-    if not csv_files:
-        logger.warning(f"No CSV files found in {token_dir}")
-        return None
-    
-    logger.info(f"Found {len(csv_files)} CSV files for {token_name}")
-    
-    # Read and combine all CSVs
-    all_data = []
-    for csv_file in sorted(csv_files):
-        try:
-            # Read CSV (Binance format)
-            df = pd.read_csv(csv_file, header=None)
-            df.columns = ["open_time", "open", "high", "low", "close", 
-                          "volume", "close_time", "quote_volume", 
-                          "count", "taker_buy_volume", "taker_buy_quote_volume", "ignore"]
-            all_data.append(df)
-        except Exception as e:
-            logger.error(f"Error reading {csv_file}: {e}")
-    
-    if not all_data:
-        logger.warning(f"No data loaded from CSVs for {token_name}")
-        return None
-    
-    # Combine all dataframes
-    combined_df = pd.concat(all_data)
-    
-    # Sort by open_time
-    combined_df = combined_df.sort_values('open_time').reset_index(drop=True)
-    
-    # Convert timestamps from milliseconds to seconds
-    combined_df['timestamp'] = combined_df['open_time'] / 1000
-    
-    # Create a simplified dataframe with just price and timestamp
-    simplified_df = pd.DataFrame({
-        'price': combined_df['close'],
-        'timestamp': combined_df['timestamp'],
-        'open': combined_df['open'],
-        'high': combined_df['high'],
-        'low': combined_df['low'],
-        'volume': combined_df['volume']
-    })
-    
-    return simplified_df
-
-# Fetch data from the database
-def load_data_from_db(token_name, hours_back=None):
+        
     try:
-        with sqlite3.connect(DATABASE_PATH) as conn:
-            cursor = conn.cursor()
+        # Baca file JSON
+        with open(cache_path, 'r') as f:
+            data = json.load(f)
             
-            # Check if timestamp column exists
-            cursor.execute(f"PRAGMA table_info(prices)")
-            columns = [col[1] for col in cursor.fetchall()]
-            
-            if 'timestamp' not in columns:
-                # Query without timestamp column
-                if hours_back:
-                    # Get the latest N prices
-                    cursor.execute("""
-                        SELECT price FROM prices 
-                        WHERE token=?
-                        ORDER BY block_height DESC
-                        LIMIT ?
-                    """, (token_name.lower(), hours_back * 60))  # Assuming 1 price per minute
-                else:
-                    cursor.execute("""
-                        SELECT price FROM prices 
-                        WHERE token=?
-                        ORDER BY block_height DESC
-                    """, (token_name.lower(),))
-                    
-                result = cursor.fetchall()
-                
-                if result:
-                    prices = np.array([x[0] for x in result])
-                    # Create dummy timestamps (we don't have real ones)
-                    timestamps = np.arange(len(prices))
-                    # Reverse to make chronological
-                    return prices[::-1].reshape(-1, 1), timestamps[::-1]
-            else:
-                # Original query with timestamp
-                if hours_back:
-                    cursor.execute("""
-                        SELECT price, timestamp FROM prices 
-                        WHERE token=? AND timestamp >= (SELECT MAX(timestamp) FROM prices WHERE token=?) - ? * 3600
-                        ORDER BY block_height ASC
-                    """, (token_name.lower(), token_name.lower(), hours_back))
-                else:
-                    cursor.execute("""
-                        SELECT price, timestamp FROM prices 
-                        WHERE token=?
-                        ORDER BY block_height ASC
-                    """, (token_name.lower(),))
-                    
-                result = cursor.fetchall()
-                
-                if result:
-                    prices = np.array([x[0] for x in result]).reshape(-1, 1)
-                    timestamps = np.array([x[1] for x in result])
-                    return prices, timestamps
+        # Konversi ke DataFrame
+        df = pd.DataFrame(data)
         
-        logger.warning(f"No data found in database for {token_name}")
-        return None, None
-    
+        # Standardisasi nama kolom
+        df.rename(columns={
+            'date': 'timestamp',
+            'close': 'price'
+        }, inplace=True)
+        
+        # Konversi timestamp ke format UNIX jika belum
+        if 'timestamp' in df.columns and not pd.api.types.is_numeric_dtype(df['timestamp']):
+            df['timestamp'] = pd.to_datetime(df['timestamp']).astype(np.int64) // 10**9
+        
+        # Memastikan data diurutkan berdasarkan timestamp
+        df = df.sort_values('timestamp').reset_index(drop=True)
+        
+        # Pastikan semua kolom yang diperlukan ada
+        required_columns = ['price', 'open', 'high', 'low', 'volume']
+        for col in required_columns:
+            if col not in df.columns:
+                if col == 'price' and 'close' in df.columns:
+                    df['price'] = df['close']
+                elif col != 'price' and 'price' in df.columns:
+                    df[col] = df['price']
+                elif col == 'volume' and col not in df.columns:
+                    df[col] = 0.0
+        
+        logger.info(f"Loaded {len(df)} records from Tiingo cache for {token_name}")
+        return df
+        
     except Exception as e:
-        logger.error(f"Error loading data from database: {e}")
-        return None, None
+        logger.error(f"Error loading Tiingo cache data: {e}")
+        logger.error(traceback.format_exc())
+        return None
 
-# Load data from directly from Binance CSV files
-def load_data_from_binance(token_name, hours_back=None):
-    logger.info(f"Loading data from Binance files for {token_name}")
-    
-    # First extract all ZIP files
-    extraction_successful = extract_zip_files(token_name)
-    if not extraction_successful:
-        logger.warning(f"Could not extract ZIP files for {token_name}")
-    
-    # Combine all CSV files
-    df = combine_csv_files(token_name)
-    if df is None:
-        logger.warning(f"Could not combine CSV files for {token_name}")
-        return None, None
-    
-    # Filter by hours_back if specified
-    if hours_back:
-        # Calculate cutoff timestamp
-        if len(df) > 0:
-            max_timestamp = df['timestamp'].max()
-            min_timestamp = max_timestamp - (hours_back * 3600)
-            df = df[df['timestamp'] >= min_timestamp]
-    
-    # Get numpy arrays
-    if len(df) > 0:
-        prices = df['price'].values.reshape(-1, 1)
-        timestamps = df['timestamp'].values
-        logger.info(f"Loaded {len(prices)} data points from Binance files for {token_name}")
-        return prices, timestamps
-    
-    logger.warning(f"No data loaded from Binance files for {token_name}")
-    return None, None
-
-# Combined data loading function that tries multiple sources
 def load_data(token_name, hours_back=None):
     """
-    Load data for the specified token, prioritizing CSV data over database
+    Load data for the specified token from Tiingo cache
+    
+    Args:
+        token_name (str): Token name (e.g., 'berausd')
+        hours_back (int): Hours of data to load
+        
+    Returns:
+        pandas.DataFrame: DataFrame with OHLCV data
     """
-    # First try loading from Binance files (prioritize this)
-    logger.info(f"Trying to load data from Binance CSV files for {token_name}")
-    prices, timestamps = load_data_from_binance(token_name, hours_back)
+    # Load from Tiingo cache
+    logger.info(f"Loading data from Tiingo cache for {token_name}")
+    df = load_data_from_tiingo_cache(token_name)
     
-    # If CSV data not found, try database as fallback
-    if prices is None:
-        logger.info(f"Data not found in CSV for {token_name}, trying database...")
-        prices, timestamps = load_data_from_db(token_name, hours_back)
+    if df is None:
+        logger.error(f"Could not load data for {token_name} from Tiingo cache")
+        return None
     
-    if prices is None:
-        raise ValueError(f"Could not load data for {token_name} from any source")
+    # If hours_back is specified and we have timestamps, filter the data
+    if hours_back is not None and 'timestamp' in df.columns:
+        max_timestamp = df['timestamp'].max()
+        cutoff_timestamp = max_timestamp - (hours_back * 3600)
+        df = df[df['timestamp'] >= cutoff_timestamp]
+        logger.info(f"Filtered data to last {hours_back} hours: {len(df)} rows")
     
-    logger.info(f"Loaded {len(prices)} data points for {token_name}")
-    return prices, timestamps
-
-#-----------------------------------------------------------------------
-# Functions for BERA Log-Return Prediction
-#-----------------------------------------------------------------------
+    logger.info(f"Loaded {len(df)} data points for {token_name}")
+    return df
 
 def calculate_log_returns(prices, period=60):
     """
     Calculate log returns for the given prices with specified period.
+    Formula: Log-Return = ln(new_price/current_price)
     
     Args:
-        prices (numpy.array): Array of price data
+        prices (numpy.array or pandas.Series): Price data
         period (int): Period for calculating returns in data points (default: 60 for 1 hour with 1-minute data)
         
     Returns:
         numpy.array: Array of log returns
     """
     # Ensure prices is a flattened array
-    if prices.ndim > 1:
-        prices = prices.flatten()
+    if isinstance(prices, np.ndarray):
+        if prices.ndim > 1:
+            prices = prices.flatten()
+    elif isinstance(prices, pd.Series):
+        prices = prices.values
+    else:
+        # Convert to numpy array if it's not already
+        prices = np.array(prices)
     
     # Calculate log returns: ln(price_t+period / price_t)
     log_returns = np.log(prices[period:] / prices[:-period])
@@ -348,14 +165,16 @@ def calculate_log_returns(prices, period=60):
 def calculate_mztae(y_true, y_pred, sigma=None):
     """
     Calculate Modified Z-transformed Absolute Error.
+    Reference mean is set to 0 and reference standard deviation is calculated 
+    over a rolling window of the last 100 ground truth Log-Returns.
     
     Args:
-        y_true (numpy.array): Actual values
-        y_pred (numpy.array): Predicted values
+        y_true (numpy.array): Actual values (ground truth log returns)
+        y_pred (numpy.array): Predicted values (predicted log returns)
         sigma (float, optional): Standard deviation for normalization, if None calculated from data
         
     Returns:
-        float: MZTAE score
+        float: MZTAE score (lower is better)
     """
     # Ensure arrays are 1D
     y_true = y_true.flatten() if hasattr(y_true, 'flatten') else y_true
@@ -399,815 +218,752 @@ def calculate_mztae(y_true, y_pred, sigma=None):
     return mztae
 
 def smooth_predictions(preds, alpha=0.2):
-    """ Exponential Moving Average (EMA) smoothing for post-prediction """
+    """ 
+    Exponential Moving Average (EMA) smoothing for post-prediction 
+    
+    Args:
+        preds (numpy.array): Predictions to smooth
+        alpha (float): Smoothing factor (0-1)
+        
+    Returns:
+        numpy.array: Smoothed predictions
+    """
     smoothed = [preds[0]]
     for p in preds[1:]:
         smoothed.append(alpha * p + (1 - alpha) * smoothed[-1])
     return np.array(smoothed)
 
-def prepare_data_for_log_return(data, look_back, prediction_period):
+def prepare_features_for_prediction(df, look_back, scaler=None):
+    """
+    Menyiapkan fitur untuk prediksi model log-return dengan 17 fitur standar
+    
+    Args:
+        df (DataFrame): Data OHLCV yang sudah diurutkan berdasarkan timestamp
+        look_back (int): Jumlah data points untuk window
+        scaler (MinMaxScaler, optional): Scaler yang sudah di-fit pada data training
+        
+    Returns:
+        numpy.array: Array fitur yang telah di-scale (17 fitur)
+    """
+    try:
+        logger.info(f"Menyiapkan fitur prediksi dari {len(df)} titik data")
+        
+        # Pastikan semua kolom yang diperlukan ada
+        required_cols = ['price', 'open', 'high', 'low']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            logger.warning(f"Kolom yang diperlukan tidak ada: {missing_cols}")
+            if 'price' in df.columns:
+                for col in missing_cols:
+                    if col != 'price':
+                        df[col] = df['price']
+            else:
+                logger.error("Tidak dapat menyiapkan fitur: kolom 'price' tidak ada")
+                return None
+        
+        # Pastikan data cukup untuk window terbesar (20 untuk SMA)
+        if len(df) < 20:
+            logger.error(f"Data tidak cukup untuk persiapan fitur: dibutuhkan minimal 20, didapat {len(df)}")
+            return None
+        
+        # Persiapkan fitur teknikal
+        # 1. Price range
+        df['price_range'] = df['high'] - df['low']
+        
+        # 2. Body size
+        df['body_size'] = abs(df['price'] - df['open'])
+        
+        # 3. Price position
+        df['price_position'] = (df['price'] - df['low']) / df['price_range'].replace(0, 1)
+        
+        # 4. Normalized volume
+        if 'volume' in df.columns:
+            df['norm_volume'] = df['volume'] / df['volume'].rolling(window=20, min_periods=1).mean()
+        else:
+            df['norm_volume'] = 0.0
+        
+        # 5. Simple Moving Averages
+        df['sma_5'] = df['price'].rolling(window=5, min_periods=1).mean()
+        df['sma_10'] = df['price'].rolling(window=10, min_periods=1).mean()
+        df['sma_20'] = df['price'].rolling(window=20, min_periods=1).mean()
+        
+        # 6. Distance from SMAs
+        df['dist_sma_5'] = (df['price'] - df['sma_5']) / df['price']
+        df['dist_sma_10'] = (df['price'] - df['sma_10']) / df['price']
+        df['dist_sma_20'] = (df['price'] - df['sma_20']) / df['price']
+        
+        # 7. Momentum
+        df['momentum_5'] = df['price'].pct_change(periods=5)
+        df['momentum_10'] = df['price'].pct_change(periods=10)
+        df['momentum_20'] = df['price'].pct_change(periods=20)
+        
+        # Isi NaN values
+        df.fillna(0, inplace=True)
+        
+        # Daftar fitur yang sama seperti saat training
+        feature_columns = [
+            'price', 'open', 'high', 'low', 'price_range',
+            'body_size', 'price_position', 'norm_volume',
+            'sma_5', 'dist_sma_5', 'sma_10', 'dist_sma_10',
+            'sma_20', 'dist_sma_20', 'momentum_5',
+            'momentum_10', 'momentum_20'
+        ]
+        
+        # Ambil look_back baris terakhir untuk window
+        if len(df) >= look_back:
+            feature_window = df.iloc[-look_back:][feature_columns].values
+            
+            # Flatten window jika diperlukan
+            flattened_features = feature_window.flatten()
+            features = flattened_features.reshape(1, -1)
+            
+            # Terapkan scaling jika scaler disediakan
+            if scaler is not None:
+                features = scaler.transform(features)
+            
+            logger.info(f"Berhasil menyiapkan fitur prediksi dengan shape: {features.shape}")
+            return features
+        else:
+            logger.error(f"Tidak cukup data untuk window size {look_back}")
+            return None
+        
+    except Exception as e:
+        logger.error(f"Error menyiapkan fitur prediksi: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+def prepare_data_for_log_return(data_df, look_back, prediction_period):
     """
     Prepare data for training log-return prediction models.
+    Uses a dataframe with OHLCV data for enhanced feature engineering.
     
     Args:
-        data (numpy.array): Price data
+        data_df (pandas.DataFrame): DataFrame with price and other OHLCV data
         look_back (int): Number of data points to use for prediction
         prediction_period (int): Prediction horizon in data points
         
     Returns:
         X, Y, prev_Y, scaler: Prepared training data and scaler
     """
-    # Ensure data is a flattened array
-    if data.ndim > 1:
-        data = data.flatten()
+    logger.info(f"Preparing data with look_back={look_back}, prediction_period={prediction_period}")
     
-    # Calculate log returns for the entire series
-    # We'll use these to create our target values
-    all_log_returns = calculate_log_returns(data, prediction_period)
+    # Check input is a DataFrame
+    if not isinstance(data_df, pd.DataFrame):
+        raise ValueError("Input must be a pandas DataFrame")
     
-    # We need to adjust our data range to align with log returns
-    # We lose `prediction_period` data points when calculating log returns
-    adjusted_data = data[:-prediction_period]
-    
-    # Scale the price data
-    price_scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_prices = price_scaler.fit_transform(adjusted_data.reshape(-1, 1))
-    
-    # Prepare feature (X) and target (Y) data
-    X, Y, prev_Y = [], [], []
-    
-    # We need at least look_back + 1 points to create a sample
-    for i in range(len(scaled_prices) - look_back):
-        # X is a window of scaled prices
-        X.append(scaled_prices[i:i + look_back, 0])
-        # Y is the log return for the prediction period starting at the end of X
-        Y.append(all_log_returns[i])
-        # prev_Y is the last price in the window (for directional accuracy)
-        prev_Y.append(scaled_prices[i + look_back - 1, 0])
-    
-    X = np.array(X)
-    Y = np.array(Y)
-    prev_Y = np.array(prev_Y)
-    
-    return X, Y, prev_Y, price_scaler
-
-def prepare_data_for_log_return_lstm(data, look_back, prediction_period):
-    """
-    Prepare data for training LSTM log-return prediction models.
-    """
-    X, Y, prev_Y, scaler = prepare_data_for_log_return(data, look_back, prediction_period)
-    
-    # Reshape X for LSTM [samples, time steps, features]
-    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-    
-    return X, Y, prev_Y, scaler
-    
-def prepare_data_for_log_return_enhanced(data, look_back, prediction_period):
-    """
-    Prepare data for training log-return prediction models with OHLC data.
-    
-    Args:
-        data (pandas.DataFrame): DataFrame with price, open, high, low, volume data
-        look_back (int): Number of data points to use for prediction
-        prediction_period (int): Prediction horizon in data points
-        
-    Returns:
-        X, Y, prev_Y, scaler: Prepared training data and scaler
-    """
-    # If data is a numpy array, convert to DataFrame
-    if isinstance(data, np.ndarray):
-        # Ensure the data is flattened
-        if data.ndim > 1:
-            data = data.flatten()
-        # Create a DataFrame with just the price column
-        df = pd.DataFrame({'price': data})
-    else:
-        # Use the DataFrame as is
-        df = data.copy()
-    
-    # Ensure all necessary columns exist
+    # Ensure all required columns exist
     required_cols = ['price']
-    for col in required_cols:
-        if col not in df.columns:
-            raise ValueError(f"Required column {col} not found in data")
+    missing_cols = [col for col in required_cols if col not in data_df.columns]
+    if missing_cols:
+        raise ValueError(f"Required columns missing: {missing_cols}")
     
-    # Calculate log returns for the target variable
-    # We use the price column for this
+    # Create a copy to avoid modifying the original DataFrame
+    df = data_df.copy()
+    
+    # Calculate log returns for target variable
     price_array = df['price'].values
-    log_returns = calculate_log_returns(price_array, prediction_period)
     
-    # Calculate additional features based on OHLC data if available
+    # Ensure we have enough data for the prediction period
+    if len(price_array) <= prediction_period:
+        logger.error(f"Not enough data points ({len(price_array)}) for prediction period ({prediction_period})")
+        return None, None, None, None
+        
+    all_log_returns = calculate_log_returns(price_array, prediction_period)
+    
+    # Create feature list, starting with price
     features_list = ['price']
     
     # Add OHLC columns if available
-    if 'open' in df.columns and 'high' in df.columns and 'low' in df.columns:
+    if all(col in df.columns for col in ['open', 'high', 'low']):
         features_list.extend(['open', 'high', 'low'])
         
-        # Add some derived features
-        # Candle body
-        df['body_size'] = abs(df['close'] - df['open']) / df['open']
-        features_list.append('body_size')
+        # Calculate price movement features
+        df['price_range'] = (df['high'] - df['low']) / df['open']  # Normalized price range
+        df['body_size'] = abs(df['price'] - df['open']) / df['open']  # Normalized body size
+        features_list.extend(['price_range', 'body_size'])
         
-        # Upper and lower shadows
-        df['upper_shadow'] = (df['high'] - df[['open', 'close']].max(axis=1)) / df['open']
-        df['lower_shadow'] = (df[['open', 'close']].min(axis=1) - df['low']) / df['open']
-        features_list.extend(['upper_shadow', 'lower_shadow'])
+        # Price position within range
+        df['price_position'] = (df['price'] - df['low']) / (df['high'] - df['low'] + 1e-8)
+        features_list.append('price_position')
     
     # Add volume if available
     if 'volume' in df.columns:
-        features_list.append('volume')
-        
-        # Add volume-based features
-        df['volume_change'] = df['volume'].pct_change()
-        features_list.append('volume_change')
+        # Normalize volume by dividing by its rolling mean
+        df['norm_volume'] = df['volume'] / df['volume'].rolling(window=20, min_periods=1).mean()
+        features_list.append('norm_volume')
     
-    # Add simple moving averages
+    # Add technical indicators as features
+    # Simple Moving Averages
     if len(df) > 20:
-        df['ema_5'] = df['price'].rolling(window=5).mean()
-        df['ema_10'] = df['price'].rolling(window=10).mean()
-        df['ema_20'] = df['price'].rolling(window=20).mean()
-        features_list.extend(['ema_5', 'ema_10', 'ema_20'])
+        for window in [5, 10, 20]:
+            col_name = f'sma_{window}'
+            df[col_name] = df['price'].rolling(window=window, min_periods=1).mean()
+            # Calculate distance from moving average
+            df[f'dist_sma_{window}'] = (df['price'] - df[col_name]) / df[col_name]
+            features_list.extend([col_name, f'dist_sma_{window}'])
     
-    # Fill NaN values
-    df = df.fillna(method='bfill').fillna(0)
+    # Calculate momentum (price change over periods)
+    for period in [5, 10, 20]:
+        if len(df) > period:
+            col_name = f'momentum_{period}'
+            df[col_name] = df['price'].pct_change(periods=period)
+            features_list.append(col_name)
     
-    # We need to adjust our data range to align with log returns
-    # We lose `prediction_period` data points when calculating log returns
+    # Fill NaN values with appropriate method
+    df = df.fillna(method='bfill').fillna(method='ffill').fillna(0)
+    
+    # Adjust data range to align with log returns
+    # We need to remove prediction_period data points from the end when calculating features
     df_adjusted = df.iloc[:-prediction_period].copy()
     
-    # Scale the features
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_features = scaler.fit_transform(df_adjusted[features_list])
+    # Debug log for data shapes
+    logger.info(f"Original dataframe shape: {df.shape}")
+    logger.info(f"Adjusted dataframe shape: {df_adjusted.shape}")
+    logger.info(f"Log returns shape: {all_log_returns.shape}")
     
-    # Prepare feature (X) and target (Y) data
+    # Scale the features
+    feature_scaler = MinMaxScaler(feature_range=(0, 1))
+    if len(df_adjusted) > 0:
+        # Set feature names to ensure consistency
+        feature_scaler.feature_names_in_ = np.array(features_list)
+        scaled_features = feature_scaler.fit_transform(df_adjusted[features_list])
+    else:
+        logger.error("No data available after adjustments")
+        return None, None, None, None
+    
+    # Prepare samples for XGBoost/RF model (flattened windows)
     X, Y, prev_Y = [], [], []
     
-    # We need at least look_back + 1 points to create a sample
-    for i in range(len(scaled_features) - look_back):
-        # X is a window of scaled features
-        X.append(scaled_features[i:i + look_back])
-        # Y is the log return for the prediction period
-        Y.append(log_returns[i])
-        # prev_Y is the last price in the window (for directional accuracy)
-        prev_Y.append(scaled_features[i + look_back - 1, 0])  # price is at index 0
+    # For each possible window
+    for i in range(len(scaled_features) - look_back + 1):
+        if i < len(all_log_returns):
+            # For tree-based models: flatten the window into a single vector
+            window_features = scaled_features[i:i + look_back].flatten()
+            X.append(window_features)
+            
+            # Y is the log return for the prediction period
+            Y.append(all_log_returns[i])
+            
+            # prev_Y is the last price in the window (for directional accuracy)
+            prev_Y.append(scaled_features[i + look_back - 1][0])  # price is at index 0
     
+    # Convert to numpy arrays
     X = np.array(X)
     Y = np.array(Y)
     prev_Y = np.array(prev_Y)
     
-    return X, Y, prev_Y, scaler
+    # Debug log for data shapes
+    logger.info(f"X shape after preparation: {X.shape}")
+    logger.info(f"Y shape after preparation: {Y.shape}")
+    logger.info(f"prev_Y shape after preparation: {prev_Y.shape}")
+    
+    # Verify that X has the expected shape (samples, features) for look_back and features_list
+    expected_features = look_back * len(features_list)
+    if X.shape[1] != expected_features:
+        logger.warning(f"X shape {X.shape[1]} doesn't match expected features {expected_features}. Training may fail.")
+    
+    return X, Y, prev_Y, feature_scaler
 
-def train_and_save_log_return_model(token_name, look_back, prediction_horizon, hours_data=None, model_type='rf'):
+def prepare_data_for_lstm(data_df, look_back, prediction_period):
     """
-    Train and save a model for log-return prediction
+    Prepare data for LSTM model with proper 3D shape
+    
+    Args:
+        data_df (pandas.DataFrame): DataFrame with price and other OHLCV data
+        look_back (int): Number of data points to use for prediction
+        prediction_period (int): Prediction horizon in data points
+        
+    Returns:
+        X, Y, prev_Y, scaler: Prepared training data and scaler
+    """
+    logger.info(f"Preparing data for LSTM with look_back={look_back}, prediction_period={prediction_period}")
+    
+    # Check input is a DataFrame
+    if not isinstance(data_df, pd.DataFrame):
+        raise ValueError("Input must be a pandas DataFrame")
+    
+    # Ensure all required columns exist
+    required_cols = ['price']
+    missing_cols = [col for col in required_cols if col not in data_df.columns]
+    if missing_cols:
+        raise ValueError(f"Required columns missing: {missing_cols}")
+    
+    # Create a copy to avoid modifying the original DataFrame
+    df = data_df.copy()
+    
+    # Calculate log returns for target variable
+    price_array = df['price'].values
+    
+    # Ensure we have enough data for the prediction period
+    if len(price_array) <= prediction_period:
+        logger.error(f"Not enough data points ({len(price_array)}) for prediction period ({prediction_period})")
+        return None, None, None, None
+        
+    all_log_returns = calculate_log_returns(price_array, prediction_period)
+    
+    # Create feature list, starting with price
+    features_list = ['price']
+    
+    # Add OHLC columns if available
+    if all(col in df.columns for col in ['open', 'high', 'low']):
+        features_list.extend(['open', 'high', 'low'])
+        
+        # Calculate price movement features
+        df['price_range'] = (df['high'] - df['low']) / df['open']  # Normalized price range
+        df['body_size'] = abs(df['price'] - df['open']) / df['open']  # Normalized body size
+        features_list.extend(['price_range', 'body_size'])
+        
+        # Price position within range
+        df['price_position'] = (df['price'] - df['low']) / (df['high'] - df['low'] + 1e-8)
+        features_list.append('price_position')
+    
+    # Add volume if available
+    if 'volume' in df.columns:
+        # Normalize volume by dividing by its rolling mean
+        df['norm_volume'] = df['volume'] / df['volume'].rolling(window=20, min_periods=1).mean()
+        features_list.append('norm_volume')
+    
+    # Add technical indicators as features
+    # Simple Moving Averages
+    if len(df) > 20:
+        for window in [5, 10, 20]:
+            col_name = f'sma_{window}'
+            df[col_name] = df['price'].rolling(window=window, min_periods=1).mean()
+            # Calculate distance from moving average
+            df[f'dist_sma_{window}'] = (df['price'] - df[col_name]) / df[col_name]
+            features_list.extend([col_name, f'dist_sma_{window}'])
+    
+    # Calculate momentum (price change over periods)
+    for period in [5, 10, 20]:
+        if len(df) > period:
+            col_name = f'momentum_{period}'
+            df[col_name] = df['price'].pct_change(periods=period)
+            features_list.append(col_name)
+    
+    # Fill NaN values with appropriate method
+    df = df.fillna(method='bfill').fillna(method='ffill').fillna(0)
+    
+    # Adjust data range to align with log returns
+    # We need to remove prediction_period data points from the end when calculating features
+    df_adjusted = df.iloc[:-prediction_period].copy()
+    
+    # Debug log for data shapes
+    logger.info(f"Original dataframe shape for LSTM: {df.shape}")
+    logger.info(f"Adjusted dataframe shape for LSTM: {df_adjusted.shape}")
+    
+    # Scale the features
+    feature_scaler = MinMaxScaler(feature_range=(0, 1))
+    if len(df_adjusted) > 0:
+        # Set feature names to ensure consistency
+        feature_scaler.feature_names_in_ = np.array(features_list)
+        scaled_features = feature_scaler.fit_transform(df_adjusted[features_list])
+    else:
+        logger.error("No data available after adjustments for LSTM")
+        return None, None, None, None
+    
+    # Prepare samples for LSTM model (3D shape)
+    X, Y, prev_Y = [], [], []
+    
+    # For each possible window
+    for i in range(len(scaled_features) - look_back + 1):
+        if i < len(all_log_returns):
+            # For LSTM, keep the 2D shape (look_back, features)
+            X.append(scaled_features[i:i + look_back])
+            
+            # Y is the log return for the prediction period
+            Y.append(all_log_returns[i])
+            
+            # prev_Y is the last price in the window (for directional accuracy)
+            prev_Y.append(scaled_features[i + look_back - 1][0])  # price is at index 0
+    
+    # Convert to numpy arrays
+    X = np.array(X)
+    Y = np.array(Y)
+    prev_Y = np.array(prev_Y)
+    
+    # Debug log for LSTM data shapes
+    logger.info(f"LSTM X shape: {X.shape}")
+    logger.info(f"LSTM Y shape: {Y.shape}")
+    
+    return X, Y, prev_Y, feature_scaler
+
+def train_and_save_rf_model(token_name, X_train, Y_train, X_test, Y_test, prev_Y_test, scaler, prediction_horizon):
+    """
+    Train and save RandomForest model for log-return prediction
+    
+    Args:
+        token_name (str): Token name (e.g., 'berausd')
+        X_train (numpy.array): Training features
+        Y_train (numpy.array): Training targets (log returns)
+        X_test (numpy.array): Test features
+        Y_test (numpy.array): Test targets (log returns)
+        prev_Y_test (numpy.array): Previous prices for directional accuracy calculation
+        scaler (MinMaxScaler): Fitted scaler for features
+        prediction_horizon (int): Prediction horizon in minutes
+        
+    Returns:
+        dict: Metrics for the trained model
+    """
+    logger.info(f"Training RandomForest model for {token_name}")
+    
+    # Create TimeSeriesSplit for cross-validation
+    tscv = TimeSeriesSplit(n_splits=5)
+    
+    # Setup RandomForest pipeline
+    pipeline = Pipeline([('rf', RandomForestRegressor(random_state=42))])
+    
+    # Hyperparameter grid - reduced for faster training
+    param_dist = {
+        'rf__n_estimators': [100, 200],
+        'rf__max_depth': [10, 20],
+        'rf__min_samples_split': [2, 5],
+        'rf__min_samples_leaf': [1, 2],
+        'rf__max_features': ['sqrt', 'log2']
+    }
+    
+    # Use RandomizedSearchCV
+    search = RandomizedSearchCV(
+        pipeline, param_distributions=param_dist, n_iter=4, cv=tscv,
+        scoring='neg_mean_absolute_error', n_jobs=3, random_state=42, verbose=1, error_score=np.nan
+    )
+    
+    # Fit the model
+    search.fit(X_train, Y_train)
+    best_model = search.best_estimator_
+    
+    # Make predictions
+    y_pred = best_model.predict(X_test)
+    
+    # Calculate metrics
+    mae = mean_absolute_error(Y_test, y_pred)
+    mse = mean_squared_error(Y_test, y_pred)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(Y_test, y_pred)
+    
+    # Calculate MZTAE
+    mztae_score = calculate_mztae(Y_test, y_pred)
+    
+    # Calculate directional accuracy
+    dir_acc = 100 * np.mean((Y_test > 0) == (y_pred > 0))
+    
+    # Log results
+    logger.info(f"RF Model - MAE: {mae}")
+    logger.info(f"RF Model - RMSE: {rmse}")
+    logger.info(f"RF Model - R² Score: {r2}")
+    logger.info(f"RF Model - MZTAE Score: {mztae_score}")
+    logger.info(f"RF Model - Directional Accuracy: {dir_acc:.2f}%")
+    
+    # Save model and scaler
+    model_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_rf_model_{prediction_horizon}m.pkl')
+    joblib.dump(best_model, model_path)
+    
+    scaler_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_scaler_{prediction_horizon}m.pkl')
+    joblib.dump(scaler, scaler_path)
+    
+    # Save metrics
+    metrics = {
+        'model': 'rf_logreturn',
+        'mae': float(mae),
+        'mse': float(mse),
+        'rmse': float(rmse),
+        'r2': float(r2),
+        'mztae': float(mztae_score),
+        'directional_accuracy': float(dir_acc)
+    }
+    
+    metrics_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_rf_metrics_{prediction_horizon}m.json')
+    with open(metrics_path, 'w') as f:
+        json.dump(metrics, f)
+        
+    logger.info(f"RF Model for {token_name} saved to {model_path}")
+    
+    return metrics
+
+def train_and_save_xgb_model(token_name, X_train, Y_train, X_test, Y_test, prev_Y_test, scaler, prediction_horizon):
+    """
+    Train and save XGBoost model for log-return prediction
+    
+    Args:
+        token_name (str): Token name (e.g., 'berausd')
+        X_train (numpy.array): Training features
+        Y_train (numpy.array): Training targets (log returns)
+        X_test (numpy.array): Test features
+        Y_test (numpy.array): Test targets (log returns)
+        prev_Y_test (numpy.array): Previous prices for directional accuracy calculation
+        scaler (MinMaxScaler): Fitted scaler for features
+        prediction_horizon (int): Prediction horizon in minutes
+        
+    Returns:
+        dict: Metrics for the trained model
+    """
+    logger.info(f"Training XGBoost model for {token_name}")
+    
+    # Create TimeSeriesSplit for cross-validation
+    tscv = TimeSeriesSplit(n_splits=5)
+    
+    # Setup XGBoost pipeline
+    pipeline = Pipeline([('xgb', XGBRegressor(random_state=42, objective='reg:squarederror'))])
+    
+    # Hyperparameter grid for XGBoost - reduced for faster training
+    param_dist = {
+        'xgb__n_estimators': [100, 200],
+        'xgb__max_depth': [3, 5],
+        'xgb__learning_rate': [0.01, 0.05],
+        'xgb__subsample': [0.8, 1.0],
+        'xgb__colsample_bytree': [0.7, 0.8],
+        'xgb__min_child_weight': [1, 2],
+        'xgb__gamma': [0, 0.1]
+    }
+    
+    # Use RandomizedSearchCV
+    search = RandomizedSearchCV(
+        pipeline, param_distributions=param_dist, n_iter=4, cv=tscv,
+        scoring='neg_mean_absolute_error', n_jobs=3, random_state=42, verbose=1, error_score=np.nan
+    )
+    
+    # Fit the model
+    search.fit(X_train, Y_train)
+    best_model = search.best_estimator_
+    
+    # Make predictions
+    y_pred = best_model.predict(X_test)
+    
+    # Calculate metrics
+    mae = mean_absolute_error(Y_test, y_pred)
+    mse = mean_squared_error(Y_test, y_pred)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(Y_test, y_pred)
+    
+    # Calculate MZTAE
+    mztae_score = calculate_mztae(Y_test, y_pred)
+    
+    # Calculate directional accuracy
+    dir_acc = 100 * np.mean((Y_test > 0) == (y_pred > 0))
+    
+    # Log results
+    logger.info(f"XGB Model - MAE: {mae}")
+    logger.info(f"XGB Model - RMSE: {rmse}")
+    logger.info(f"XGB Model - R² Score: {r2}")
+    logger.info(f"XGB Model - MZTAE Score: {mztae_score}")
+    logger.info(f"XGB Model - Directional Accuracy: {dir_acc:.2f}%")
+    
+    # Save model and scaler
+    model_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_xgb_model_{prediction_horizon}m.pkl')
+    joblib.dump(best_model, model_path)
+    
+    scaler_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_scaler_{prediction_horizon}m.pkl')
+    joblib.dump(scaler, scaler_path)
+    
+    # Save metrics
+    metrics = {
+        'model': 'xgb_logreturn',
+        'mae': float(mae),
+        'mse': float(mse),
+        'rmse': float(rmse),
+        'r2': float(r2),
+        'mztae': float(mztae_score),
+        'directional_accuracy': float(dir_acc)
+    }
+    
+    metrics_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_xgb_metrics_{prediction_horizon}m.json')
+    with open(metrics_path, 'w') as f:
+        json.dump(metrics, f)
+        
+    logger.info(f"XGB Model for {token_name} saved to {model_path}")
+    
+    return metrics
+
+def train_and_save_lstm_model(token_name, X_train, Y_train, X_test, Y_test, prev_Y_test, scaler, prediction_horizon, look_back):
+    """
+    Train and save LSTM model for log-return prediction
+    
+    Args:
+        token_name (str): Token name (e.g., 'berausd')
+        X_train (numpy.array): Training features (3D shape for LSTM)
+        Y_train (numpy.array): Training targets (log returns)
+        X_test (numpy.array): Test features (3D shape for LSTM)
+        Y_test (numpy.array): Test targets (log returns)
+        prev_Y_test (numpy.array): Previous prices for directional accuracy calculation
+        scaler (MinMaxScaler): Fitted scaler for features
+        prediction_horizon (int): Prediction horizon in minutes
+        look_back (int): Look back window size
+        
+    Returns:
+        dict: Metrics for the trained model
+    """
+    logger.info(f"Training LSTM model for {token_name}")
+    
+    # Split training data into train and validation sets
+    X_train_split, X_val = X_train[:int(0.8*len(X_train))], X_train[int(0.8*len(X_train)):]
+    Y_train_split, Y_val = Y_train[:int(0.8*len(Y_train))], Y_train[int(0.8*len(Y_train)):]
+    
+    # Get input dimensions
+    n_features = X_train.shape[2]
+    
+    # Create LSTM model
+    model = Sequential()
+    model.add(LSTM(units=50, return_sequences=True, input_shape=(look_back, n_features)))
+    model.add(Dropout(0.2))
+    model.add(LSTM(units=30, return_sequences=False))
+    model.add(Dropout(0.2))
+    model.add(Dense(units=1))
+    
+    # Compile the model with Adam optimizer
+    optimizer = Adam(learning_rate=0.001)
+    model.compile(optimizer=optimizer, loss='mean_squared_error')
+    
+    # Callbacks for training
+    early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.0001)
+    
+    # Train the model
+    history = model.fit(
+        X_train_split, Y_train_split,
+        epochs=35,  # Reduced for faster training
+        batch_size=32,
+        validation_data=(X_val, Y_val),
+        callbacks=[early_stop, reduce_lr],
+        verbose=1
+    )
+    
+    # Make predictions with smoothing
+    y_pred = model.predict(X_test).flatten()
+    y_pred = smooth_predictions(y_pred, alpha=0.2)
+    
+    # Calculate metrics
+    mae = mean_absolute_error(Y_test, y_pred)
+    mse = mean_squared_error(Y_test, y_pred)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(Y_test, y_pred)
+    
+    # Calculate MZTAE
+    mztae_score = calculate_mztae(Y_test, y_pred)
+    
+    # Calculate directional accuracy
+    dir_acc = 100 * np.mean((Y_test > 0) == (y_pred > 0))
+    
+    # Log results
+    logger.info(f"LSTM Model - MAE: {mae}")
+    logger.info(f"LSTM Model - RMSE: {rmse}")
+    logger.info(f"LSTM Model - R² Score: {r2}")
+    logger.info(f"LSTM Model - MZTAE Score: {mztae_score}")
+    logger.info(f"LSTM Model - Directional Accuracy: {dir_acc:.2f}%")
+    
+    # Plot training & validation loss
+    plt.figure(figsize=(10, 6))
+    plt.plot(history.history['loss'])
+    plt.plot(history.history['val_loss'])
+    plt.title(f'LSTM Log-Return Model Loss for {token_name} ({prediction_horizon}m)')
+    plt.ylabel('Loss')
+    plt.xlabel('Epoch')
+    plt.legend(['Train', 'Validation'], loc='upper right')
+    plt.savefig(os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_lstm_loss_{prediction_horizon}m.png'))
+    
+    # Save model, scaler, and metrics
+    model_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_lstm_model_{prediction_horizon}m.keras')
+    save_model(model, model_path)
+    
+    scaler_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_scaler_{prediction_horizon}m.pkl')
+    joblib.dump(scaler, scaler_path)
+    
+    # Save metrics
+    metrics = {
+        'model': 'lstm_logreturn',
+        'mae': float(mae),
+        'mse': float(mse),
+        'rmse': float(rmse),
+        'r2': float(r2),
+        'mztae': float(mztae_score),
+        'directional_accuracy': float(dir_acc)
+    }
+    
+    metrics_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_lstm_metrics_{prediction_horizon}m.json')
+    with open(metrics_path, 'w') as f:
+        json.dump(metrics, f)
+        
+    logger.info(f"LSTM Model for {token_name} saved to {model_path}")
+    
+    return metrics
+
+def train_log_return_models(token_name, look_back, prediction_horizon, hours_data=None):
+    """
+    Wrapper function to train all model types for log-return prediction
+    Uses data from Tiingo cache for better robustness
     
     Args:
         token_name (str): Token name (e.g., 'berausd')
         look_back (int): Number of past data points to use for prediction
         prediction_horizon (int): Prediction horizon in minutes
         hours_data (int): Hours of historical data to use
-        model_type (str): Model type to use ('rf', 'xgb', or 'lstm')
+    
+    Returns:
+        dict: Results from all models
     """
     try:
-        logger.info(f"Training {model_type.upper()} Log-Return model for {token_name} with {prediction_horizon}-minute horizon")
+        logger.info(f"Training Log-Return models for {token_name} with {prediction_horizon}-minute horizon")
         
-        # Load data
-        data, timestamps = load_data(token_name, hours_data)
+        # Load data from Tiingo cache
+        data_df = load_data(token_name, hours_data)
         
-        # Convert data to DataFrame if it's a numpy array
-        if isinstance(data, np.ndarray):
-            # We need to reshape to ensure it's a proper column
-            if data.ndim > 1:
-                price_data = data.flatten()
-            else:
-                price_data = data
-            data_df = pd.DataFrame({'price': price_data, 'timestamp': timestamps})
+        if data_df is None:
+            logger.error(f"Could not load data for {token_name}")
+            return None
+            
+        # Train test split for all models
+        results = {}
+        
+        # Train Random Forest model
+        logger.info("Preparing data for RandomForest model...")
+        X, Y, prev_Y, scaler = prepare_data_for_log_return(data_df, look_back, prediction_horizon)
+        
+        if X is None:
+            logger.error("Failed to prepare data for RF model")
+            return None
+        
+        # Split into train and test sets
+        test_size = int(0.2 * len(X))
+        X_train, X_test = X[:-test_size], X[-test_size:]
+        Y_train, Y_test = Y[:-test_size], Y[-test_size:]
+        prev_Y_test = prev_Y[-test_size:]
+        
+        logger.info(f"Training set size: {len(X_train)}, Test set size: {len(X_test)}")
+        
+        # Train RF model
+        rf_metrics = train_and_save_rf_model(token_name, X_train, Y_train, X_test, Y_test, prev_Y_test, scaler, prediction_horizon)
+        if rf_metrics:
+            results['rf'] = rf_metrics
+        
+        # Train XGBoost model (uses same data preparation as RF)
+        xgb_metrics = train_and_save_xgb_model(token_name, X_train, Y_train, X_test, Y_test, prev_Y_test, scaler, prediction_horizon)
+        if xgb_metrics:
+            results['xgb'] = xgb_metrics
+        
+        # Train LSTM model (needs special data preparation)
+        logger.info("Preparing data for LSTM model...")
+        X_lstm, Y_lstm, prev_Y_lstm, scaler_lstm = prepare_data_for_lstm(data_df, look_back, prediction_horizon)
+        
+        if X_lstm is None:
+            logger.error("Failed to prepare data for LSTM model")
         else:
-            data_df = data
-
-        # Prepare data based on model type
-        if model_type == 'lstm':
-            # For LSTM, we need to reshape the data differently
-            X, Y, prev_Y, scaler = prepare_data_for_log_return_lstm(data_df['price'].values, look_back, prediction_horizon)
-        else:
-            # Use the enhanced preparation function that can handle OHLC data
-            X, Y, prev_Y, scaler = prepare_data_for_log_return_enhanced(data_df, look_back, prediction_horizon)
+            # Split into train and test sets
+            test_size_lstm = int(0.2 * len(X_lstm))
+            X_train_lstm, X_test_lstm = X_lstm[:-test_size_lstm], X_lstm[-test_size_lstm:]
+            Y_train_lstm, Y_test_lstm = Y_lstm[:-test_size_lstm], Y_lstm[-test_size_lstm:]
+            prev_Y_test_lstm = prev_Y_lstm[-test_size_lstm:]
+            
+            logger.info(f"LSTM training set size: {len(X_train_lstm)}, Test set size: {len(X_test_lstm)}")
+            
+            # Train LSTM model
+            lstm_metrics = train_and_save_lstm_model(token_name, X_train_lstm, Y_train_lstm, X_test_lstm, Y_test_lstm, prev_Y_test_lstm, scaler_lstm, prediction_horizon, look_back)
+            if lstm_metrics:
+                results['lstm'] = lstm_metrics
         
-        # Use a portion for final testing
-        X_train_val, X_test, Y_train_val, Y_test, prev_Y_train_val, prev_Y_test = train_test_split(
-            X, Y, prev_Y, test_size=0.2, shuffle=False
-        )
-        
-        # Use time series split for cross-validation
-        tscv = TimeSeriesSplit(n_splits=5)
-        
-        if model_type == 'rf':
-            # Random Forest model
-            pipeline = Pipeline([('rf', RandomForestRegressor(random_state=42))])
-            
-            # Hyperparameter grid - reduced for faster training
-            param_dist = {
-                'rf__n_estimators': [100, 200, 300],
-                'rf__max_depth': [None, 10, 20],
-                'rf__min_samples_split': [2, 5],
-                'rf__min_samples_leaf': [1, 2],
-                'rf__max_features': ['sqrt', 'log2']
-            }
-            
-            # Use RandomizedSearchCV with TimeSeriesSplit
-            search = RandomizedSearchCV(
-                pipeline, param_distributions=param_dist, n_iter=5, cv=tscv,
-                scoring='neg_mean_absolute_error', n_jobs=3, random_state=42, verbose=1
-            )
-            
-            # Fit the model
-            search.fit(X_train_val, Y_train_val)
-            best_model = search.best_estimator_
-            
-            # Make predictions
-            y_pred = best_model.predict(X_test)
-            
-            # Calculate regular metrics
-            mae = mean_absolute_error(Y_test, y_pred)
-            mse = mean_squared_error(Y_test, y_pred)
-            rmse = np.sqrt(mse)
-            r2 = r2_score(Y_test, y_pred)
-            
-            # Calculate MZTAE using rolling window approach
-            mztae_score = calculate_mztae(Y_test, y_pred)
-            
-            # Calculate directional accuracy where possible
-            # For log returns, we compare the sign of the predicted vs actual log return
-            dir_acc = 100 * np.mean((Y_test > 0) == (y_pred > 0))
-            
-            # Log results
-            logger.info(f"RF Log-Return Model - MAE: {mae}")
-            logger.info(f"RF Log-Return Model - RMSE: {rmse}")
-            logger.info(f"RF Log-Return Model - R² Score: {r2}")
-            logger.info(f"RF Log-Return Model - MZTAE Score: {mztae_score}")
-            logger.info(f"RF Log-Return Model - Directional Accuracy: {dir_acc:.2f}%")
-            
-            # Save model and scaler
-            model_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_rf_model_{prediction_horizon}m.pkl')
-            joblib.dump(best_model, model_path)
-            
-            scaler_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_scaler_{prediction_horizon}m.pkl')
-            joblib.dump(scaler, scaler_path)
-            
-            # Save metrics
-            metrics = {
-                'model': f'{model_type}_logreturn',
-                'mae': float(mae),
-                'mse': float(mse),
-                'rmse': float(rmse),
-                'r2': float(r2),
-                'mztae': float(mztae_score),
-                'directional_accuracy': float(dir_acc)
-            }
-            
-            metrics_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_rf_metrics_{prediction_horizon}m.json')
-            with open(metrics_path, 'w') as f:
-                json.dump(metrics, f)
-                
-            logger.info(f"RF Log-Return Model for {token_name} saved to {model_path}")
-            
-            return metrics
-            
-        elif model_type == 'xgb':
-            # XGBoost model
-            pipeline = Pipeline([('xgb', XGBRegressor(random_state=42, objective='reg:squarederror'))])
-            
-            # Hyperparameter grid for XGBoost - reduced for faster training
-            param_dist = {
-                'xgb__n_estimators': [100, 200, 300],
-                'xgb__max_depth': [3, 5, 7],
-                'xgb__learning_rate': [0.01, 0.05, 0.1],
-                'xgb__subsample': [0.7, 0.8, 0.9],
-                'xgb__colsample_bytree': [0.7, 0.8, 0.9],
-                'xgb__min_child_weight': [1, 2, 3],
-                'xgb__gamma': [0, 0.1]
-            }
-            
-            # Use RandomizedSearchCV with TimeSeriesSplit
-            search = RandomizedSearchCV(
-                pipeline, param_distributions=param_dist, n_iter=5, cv=tscv,
-                scoring='neg_mean_absolute_error', n_jobs=3, random_state=42, verbose=1
-            )
-            
-            # Fit the model
-            search.fit(X_train_val, Y_train_val)
-            best_model = search.best_estimator_
-            
-            # Make predictions
-            y_pred = best_model.predict(X_test)
-            
-            # Calculate regular metrics
-            mae = mean_absolute_error(Y_test, y_pred)
-            mse = mean_squared_error(Y_test, y_pred)
-            rmse = np.sqrt(mse)
-            r2 = r2_score(Y_test, y_pred)
-            
-            # Calculate MZTAE using rolling window approach
-            mztae_score = calculate_mztae(Y_test, y_pred)
-            
-            # Calculate directional accuracy
-            dir_acc = 100 * np.mean((Y_test > 0) == (y_pred > 0))
-            
-            # Log results
-            logger.info(f"XGB Log-Return Model - MAE: {mae}")
-            logger.info(f"XGB Log-Return Model - RMSE: {rmse}")
-            logger.info(f"XGB Log-Return Model - R² Score: {r2}")
-            logger.info(f"XGB Log-Return Model - MZTAE Score: {mztae_score}")
-            logger.info(f"XGB Log-Return Model - Directional Accuracy: {dir_acc:.2f}%")
-            
-            # Save model and scaler
-            model_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_xgb_model_{prediction_horizon}m.pkl')
-            joblib.dump(best_model, model_path)
-            
-            scaler_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_scaler_{prediction_horizon}m.pkl')
-            joblib.dump(scaler, scaler_path)
-            
-            # Save metrics
-            metrics = {
-                'model': f'{model_type}_logreturn',
-                'mae': float(mae),
-                'mse': float(mse),
-                'rmse': float(rmse),
-                'r2': float(r2),
-                'mztae': float(mztae_score),
-                'directional_accuracy': float(dir_acc)
-            }
-            
-            metrics_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_xgb_metrics_{prediction_horizon}m.json')
-            with open(metrics_path, 'w') as f:
-                json.dump(metrics, f)
-                
-            logger.info(f"XGB Log-Return Model for {token_name} saved to {model_path}")
-            
-            return metrics
-            
-        elif model_type == 'lstm':
-            # Split validation data from training data
-            X_train, X_val = X_train_val[:int(0.8*len(X_train_val))], X_train_val[int(0.8*len(X_train_val)):]
-            Y_train, Y_val = Y_train_val[:int(0.8*len(Y_train_val))], Y_train_val[int(0.8*len(Y_train_val)):]
-            
-            # Create LSTM model
-            model = Sequential()
-            model.add(LSTM(units=50, return_sequences=True, input_shape=(look_back, 1)))
-            model.add(Dropout(0.2))
-            model.add(LSTM(units=30, return_sequences=False))
-            model.add(Dropout(0.2))
-            model.add(Dense(units=1))
-            
-            # Compile the model with Adam optimizer
-            optimizer = Adam(learning_rate=0.001)
-            model.compile(optimizer=optimizer, loss='mean_squared_error')
-            
-            # Callbacks for training
-            early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-            reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.0001)
-            
-            # Train the model
-            history = model.fit(
-                X_train, Y_train,
-                epochs=50,  # Reduced for faster training
-                batch_size=32,
-                validation_data=(X_val, Y_val),
-                callbacks=[early_stop, reduce_lr],
-                verbose=1
-            )
-            
-            # Make predictions smoothing
-            y_pred = model.predict(X_test).flatten()
-            y_pred = smooth_predictions(y_pred, alpha=0.2)
-            
-            # Calculate regular metrics
-            mae = mean_absolute_error(Y_test, y_pred)
-            mse = mean_squared_error(Y_test, y_pred)
-            rmse = np.sqrt(mse)
-            r2 = r2_score(Y_test, y_pred)
-            
-            # Calculate MZTAE using rolling window approach
-            mztae_score = calculate_mztae(Y_test, y_pred)
-            
-            # Calculate directional accuracy
-            dir_acc = 100 * np.mean((Y_test > 0) == (y_pred.flatten() > 0))
-            
-            # Log results
-            logger.info(f"LSTM Log-Return Model - MAE: {mae}")
-            logger.info(f"LSTM Log-Return Model - RMSE: {rmse}")
-            logger.info(f"LSTM Log-Return Model - R² Score: {r2}")
-            logger.info(f"LSTM Log-Return Model - MZTAE Score: {mztae_score}")
-            logger.info(f"LSTM Log-Return Model - Directional Accuracy: {dir_acc:.2f}%")
-            
-            # Plot training & validation loss
-            plt.figure(figsize=(10, 6))
-            plt.plot(history.history['loss'])
-            plt.plot(history.history['val_loss'])
-            plt.title(f'LSTM Log-Return Model Loss for {token_name} ({prediction_horizon}m)')
-            plt.ylabel('Loss')
-            plt.xlabel('Epoch')
-            plt.legend(['Train', 'Validation'], loc='upper right')
-            plt.savefig(os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_lstm_loss_{prediction_horizon}m.png'))
-            
-            # Save model, scaler, and metrics
-            model_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_model_{prediction_horizon}m.keras')
-            save_model(model, model_path)
-            
-            scaler_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_scaler_{prediction_horizon}m.pkl')
-            joblib.dump(scaler, scaler_path)
-            
-            # Save metrics
-            metrics = {
-                'model': f'{model_type}_logreturn',
-                'mae': float(mae),
-                'mse': float(mse),
-                'rmse': float(rmse),
-                'r2': float(r2),
-                'mztae': float(mztae_score),
-                'directional_accuracy': float(dir_acc)
-            }
-            
-            metrics_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_lstm_metrics_{prediction_horizon}m.json')
-            with open(metrics_path, 'w') as f:
-                json.dump(metrics, f)
-                
-            logger.info(f"LSTM Log-Return Model for {token_name} saved to {model_path}")
-            
-            return metrics
-            
+        return results
+    
     except Exception as e:
-        logger.error(f"Error training log-return model for {token_name}: {e}", exc_info=True)
+        logger.error(f"Error training log-return models for {token_name}: {e}")
+        logger.error(traceback.format_exc())
         return None
-
-#-----------------------------------------------------------------------
-# Functions for ETH Volatility Prediction
-#-----------------------------------------------------------------------
-
-def calculate_volatility(prices, window=360):
-    """
-    Calculate volatility as the standardized rolling standard deviation of log returns.
-    
-    Args:
-        prices (numpy.array): Price data
-        window (int): Window size for volatility calculation (default: 360 for 6 hours with 1-minute data)
-        
-    Returns:
-        numpy.array: Volatility values
-    """
-    # Ensure prices is a flattened array
-    if prices.ndim > 1:
-        prices = prices.flatten()
-    
-    # Calculate log returns
-    log_returns = np.log(prices[1:] / prices[:-1])
-    
-    # Calculate rolling standard deviation
-    volatility = []
-    for i in range(len(log_returns) - window + 1):
-        window_returns = log_returns[i:i+window]
-        vol = np.std(window_returns)
-        volatility.append(vol)
-    
-    # Convert to numpy array
-    volatility = np.array(volatility)
-    
-    # Standardize (multiply by sqrt(360 / 1))
-    # Since we're using 1-minute data, we multiply by sqrt(360)
-    standardized_volatility = volatility * np.sqrt(360)
-    
-    return standardized_volatility
-
-def prepare_data_for_volatility(data, look_back, prediction_horizon, window=360):
-    """
-    Prepare data for training volatility prediction models.
-    
-    Args:
-        data (numpy.array): Price data
-        look_back (int): Number of data points to use for prediction
-        prediction_horizon (int): Prediction horizon in data points
-        window (int): Window size for volatility calculation
-        
-    Returns:
-        X, Y, prev_Y, scaler: Prepared training data and scaler
-    """
-    # Ensure data is a flattened array
-    if data.ndim > 1:
-        data = data.flatten()
-    
-    # Calculate volatility for the entire price series
-    volatility = calculate_volatility(data, window)
-    
-    # We need to ensure our X, Y data align properly
-    # The last point in our X data should be at index: len(data) - prediction_horizon - window
-    # This ensures that the corresponding Y value (after prediction_horizon) has enough data
-    # to calculate volatility using the window
-    
-    # Calculate how many points we lose due to volatility calculation and prediction horizon
-    total_offset = window + prediction_horizon
-    
-    # Prepare the data, leaving enough points at the end for the prediction target
-    X, Y, prev_Y = [], [], []
-    
-    for i in range(len(data) - look_back - total_offset + 1):
-        # Features from the current window
-        X.append(data[i:i+look_back])
-        
-        # Target is the volatility at prediction_horizon steps ahead
-        Y.append(volatility[i+look_back+prediction_horizon-1])
-        
-        # Store the last price in the window for reference
-        prev_Y.append(data[i+look_back-1])
-    
-    X = np.array(X)
-    Y = np.array(Y)
-    prev_Y = np.array(prev_Y)
-    
-    # Scale the input features
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    X_reshaped = X.reshape(X.shape[0], X.shape[1])
-    X_scaled = scaler.fit_transform(X_reshaped)
-    
-    return X_scaled, Y, prev_Y, scaler
-
-def prepare_data_for_volatility_lstm(data, look_back, prediction_horizon, window=360):
-    """
-    Prepare data for LSTM volatility prediction models.
-    """
-    X, Y, prev_Y, scaler = prepare_data_for_volatility(data, look_back, prediction_horizon, window)
-    
-    # Reshape X for LSTM [samples, time steps, features]
-    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-    
-    return X, Y, prev_Y, scaler
-
-def train_and_save_volatility_model(token_name, look_back, prediction_horizon, hours_data=None, model_type='rf'):
-    """
-    Train and save model for volatility prediction
-    
-    Args:
-        token_name (str): Token name (e.g., 'ethusd')
-        look_back (int): Number of past data points to use for prediction
-        prediction_horizon (int): Prediction horizon in minutes
-        hours_data (int): Hours of historical data to use
-        model_type (str): Model type to use ('rf', 'xgb', or 'lstm')
-    """
-    try:
-        logger.info(f"Training {model_type.upper()} Volatility model for {token_name} with {prediction_horizon}-minute horizon")
-        
-        # Load data
-        data, timestamps = load_data(token_name, hours_data)
-        
-        # Calculate the appropriate volatility window (360 minutes for 6h volatility)
-        volatility_window = 360
-        
-        # Prepare data based on model type
-        if model_type == 'lstm':
-            X, Y, prev_Y, scaler = prepare_data_for_volatility_lstm(data, look_back, prediction_horizon, volatility_window)
-        else:
-            X, Y, prev_Y, scaler = prepare_data_for_volatility(data, look_back, prediction_horizon, volatility_window)
-        
-        # Use time series split for validation
-        tscv = TimeSeriesSplit(n_splits=5)
-        
-        # Use a portion for final testing (20% of data)
-        total_samples = len(X)
-        test_size = int(total_samples * 0.2)
-        train_val_size = total_samples - test_size
-        
-        X_train_val = X[:train_val_size]
-        Y_train_val = Y[:train_val_size]
-        X_test = X[train_val_size:]
-        Y_test = Y[train_val_size:]
-        prev_Y_test = prev_Y[train_val_size:]
-        
-        if model_type == 'rf':
-            # Random Forest for volatility prediction
-            pipeline = Pipeline([('rf', RandomForestRegressor(random_state=42))])
-            
-            # Reduced parameter grid for faster training
-            param_dist = {
-                'rf__n_estimators': [100, 200, 300],
-                'rf__max_depth': [None, 10, 20],
-                'rf__min_samples_split': [2, 5],
-                'rf__min_samples_leaf': [1, 2, 4],
-                'rf__max_features': ['sqrt', 'log2', None]
-            }
-            
-            # Use RandomizedSearchCV with TimeSeriesSplit
-            search = RandomizedSearchCV(
-                pipeline, param_distributions=param_dist, n_iter=5, cv=tscv,
-                scoring='neg_mean_squared_error', n_jobs=3, random_state=42, verbose=1
-            )
-            
-            # Fit the model
-            search.fit(X_train_val, Y_train_val)
-            best_model = search.best_estimator_
-            
-            # Make predictions
-            y_pred = best_model.predict(X_test)
-            
-            # Calculate metrics
-            mae = mean_absolute_error(Y_test, y_pred)
-            mse = mean_squared_error(Y_test, y_pred)
-            rmse = np.sqrt(mse)
-            r2 = r2_score(Y_test, y_pred)
-            
-            # Calculate MAPE
-            mape = np.mean(np.abs((Y_test - y_pred) / np.maximum(Y_test, 1e-10))) * 100
-            
-            # Log results
-            logger.info(f"RF Volatility Model - MAE: {mae}")
-            logger.info(f"RF Volatility Model - RMSE: {rmse}")
-            logger.info(f"RF Volatility Model - R² Score: {r2}")
-            logger.info(f"RF Volatility Model - MAPE: {mape:.2f}%")
-            
-            # Save model and scaler
-            model_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_volatility_rf_model_{prediction_horizon}m.pkl')
-            joblib.dump(best_model, model_path)
-            
-            scaler_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_volatility_scaler_{prediction_horizon}m.pkl')
-            joblib.dump(scaler, scaler_path)
-            
-            # Save metrics
-            metrics = {
-                'model': f'{model_type}_volatility',
-                'mae': float(mae),
-                'mse': float(mse),
-                'rmse': float(rmse),
-                'r2': float(r2),
-                'mape': float(mape)
-            }
-            
-            metrics_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_volatility_rf_metrics_{prediction_horizon}m.json')
-            with open(metrics_path, 'w') as f:
-                json.dump(metrics, f)
-                
-            logger.info(f"RF Volatility Model for {token_name} saved to {model_path}")
-            
-            return metrics
-            
-        elif model_type == 'xgb':
-            # XGBoost for volatility prediction
-            pipeline = Pipeline([('xgb', XGBRegressor(random_state=42, objective='reg:squarederror'))])
-            
-            # Parameter grid for XGBoost
-            param_dist = {
-                'xgb__n_estimators': [100, 200, 300],
-                'xgb__max_depth': [3, 5, 7],
-                'xgb__learning_rate': [0.01, 0.05, 0.1],
-                'xgb__subsample': [0.7, 0.8, 0.9],
-                'xgb__colsample_bytree': [0.7, 0.8, 0.9],
-                'xgb__min_child_weight': [1, 2, 3],
-                'xgb__gamma': [0, 0.1]
-            }
-            
-            # RandomizedSearchCV with TimeSeriesSplit
-            search = RandomizedSearchCV(
-                pipeline, param_distributions=param_dist, n_iter=5, cv=tscv,
-                scoring='neg_mean_squared_error', n_jobs=3, random_state=42, verbose=1
-            )
-            
-            # Fit the model
-            search.fit(X_train_val, Y_train_val)
-            best_model = search.best_estimator_
-            
-            # Make predictions
-            y_pred = best_model.predict(X_test)
-            
-            # Calculate metrics (same as RF)
-            mae = mean_absolute_error(Y_test, y_pred)
-            mse = mean_squared_error(Y_test, y_pred)
-            rmse = np.sqrt(mse)
-            r2 = r2_score(Y_test, y_pred)
-            mape = np.mean(np.abs((Y_test - y_pred) / np.maximum(Y_test, 1e-10))) * 100
-            
-            # Log results
-            logger.info(f"XGB Volatility Model - MAE: {mae}")
-            logger.info(f"XGB Volatility Model - RMSE: {rmse}")
-            logger.info(f"XGB Volatility Model - R² Score: {r2}")
-            logger.info(f"XGB Volatility Model - MAPE: {mape:.2f}%")
-            
-            # Save model, scaler, and metrics
-            model_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_volatility_xgb_model_{prediction_horizon}m.pkl')
-            joblib.dump(best_model, model_path)
-            
-            scaler_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_volatility_scaler_{prediction_horizon}m.pkl')
-            joblib.dump(scaler, scaler_path)
-            
-            metrics = {
-                'model': f'{model_type}_volatility',
-                'mae': float(mae),
-                'mse': float(mse),
-                'rmse': float(rmse),
-                'r2': float(r2),
-                'mape': float(mape)
-            }
-            
-            metrics_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_volatility_xgb_metrics_{prediction_horizon}m.json')
-            with open(metrics_path, 'w') as f:
-                json.dump(metrics, f)
-                
-            logger.info(f"XGB Volatility Model for {token_name} saved to {model_path}")
-            
-            return metrics
-            
-        elif model_type == 'lstm':
-            # LSTM for volatility prediction
-            X_train, X_val = X_train_val[:int(0.8*len(X_train_val))], X_train_val[int(0.8*len(X_train_val)):]
-            Y_train, Y_val = Y_train_val[:int(0.8*len(Y_train_val))], Y_train_val[int(0.8*len(Y_train_val)):]
-            
-            # Try a simple LSTM architecture for faster training
-            model = Sequential()
-            model.add(LSTM(units=50, return_sequences=True, input_shape=(look_back, 1)))
-            model.add(Dropout(0.2))
-            model.add(LSTM(units=30, return_sequences=False))
-            model.add(Dropout(0.2))
-            model.add(Dense(units=1))
-            
-            # Compile model with Adam optimizer
-            optimizer = Adam(learning_rate=0.001)
-            model.compile(optimizer=optimizer, loss='mean_squared_error')
-            
-            # Callbacks for training
-            early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-            reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.0001)
-            
-            # Train the model with reduced epochs
-            history = model.fit(
-                X_train, Y_train,
-                epochs=50,  # Reduced epochs for faster training
-                batch_size=32,
-                validation_data=(X_val, Y_val),
-                callbacks=[early_stop, reduce_lr],
-                verbose=1
-            )
-            
-            # Make predictions
-            y_pred = model.predict(X_test)
-            
-            # Calculate metrics
-            mae = mean_absolute_error(Y_test, y_pred)
-            mse = mean_squared_error(Y_test, y_pred)
-            rmse = np.sqrt(mse)
-            r2 = r2_score(Y_test, y_pred)
-            mape = np.mean(np.abs((Y_test - y_pred.flatten()) / np.maximum(Y_test, 1e-10))) * 100
-            
-            # Log results
-            logger.info(f"LSTM Volatility Model - MAE: {mae}")
-            logger.info(f"LSTM Volatility Model - RMSE: {rmse}")
-            logger.info(f"LSTM Volatility Model - R² Score: {r2}")
-            logger.info(f"LSTM Volatility Model - MAPE: {mape:.2f}%")
-            
-            # Plot training & validation loss
-            plt.figure(figsize=(10, 6))
-            plt.plot(history.history['loss'])
-            plt.plot(history.history['val_loss'])
-            plt.title(f'LSTM Volatility Model Loss for {token_name} ({prediction_horizon}m)')
-            plt.ylabel('Loss')
-            plt.xlabel('Epoch')
-            plt.legend(['Train', 'Validation'], loc='upper right')
-            plt.savefig(os.path.join(MODELS_DIR, f'{token_name.lower()}_volatility_lstm_loss_{prediction_horizon}m.png'))
-            
-            # Save model, scaler, and metrics
-            model_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_volatility_model_{prediction_horizon}m.keras')
-            save_model(model, model_path)
-            
-            scaler_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_volatility_scaler_{prediction_horizon}m.pkl')
-            joblib.dump(scaler, scaler_path)
-            
-            metrics = {
-                'model': f'{model_type}_volatility',
-                'mae': float(mae),
-                'mse': float(mse),
-                'rmse': float(rmse),
-                'r2': float(r2),
-                'mape': float(mape)
-            }
-            
-            metrics_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_volatility_lstm_metrics_{prediction_horizon}m.json')
-            with open(metrics_path, 'w') as f:
-                json.dump(metrics, f)
-                
-            logger.info(f"LSTM Volatility Model for {token_name} saved to {model_path}")
-            
-            return metrics
-            
-    except Exception as e:
-        logger.error(f"Error training volatility model for {token_name}: {e}", exc_info=True)
-        return None
-
-# Define different time horizons for model training
-time_horizons = {
-    '60m': (60, 60),      # 1-hour prediction with 60 data points lookback for BERA log-return
-    '360m': (72, 360),    # 6-hour prediction with 72 data points lookback for ETH volatility
-}
-
-# Define how much historical data to use (in hours)
-data_requirements = {
-    '60m': 720,       # 30 days * 24 hours for BERA log-return
-    '360m': 2160,     # 90 days * 24 hours for ETH volatility
-}
 
 # Main execution
 if __name__ == "__main__":
@@ -1218,36 +974,23 @@ if __name__ == "__main__":
         os.makedirs(MODELS_DIR)
         logger.info(f"Created models directory at {MODELS_DIR}")
     
-    # Download data for new tokens if needed
-    logger.info("Checking/downloading data for BERA")
-    download_token_data("bera", interval="1m", months=2)
+    # Ensure cache directories exist
+    os.makedirs(TIINGO_CACHE_DIR, exist_ok=True)
+    logger.info(f"Cache directory: Tiingo={TIINGO_CACHE_DIR}")
     
     # Train models for BERA/USD Log-Return with 1-hour horizon
     token_name = "berausd"
-    horizon_name = "60m"
-    look_back, prediction_horizon = time_horizons[horizon_name]
-    hours_data = data_requirements[horizon_name]
+    look_back = 60  # 60 minutes of lookback data
+    prediction_horizon = 60  # 1-hour prediction horizon
+    hours_data = 720  # 30 days * 24 hours
+    
     logger.info(f"\n{'='*50}")
     logger.info(f"Training Log-Return models for {token_name.upper()} with {prediction_horizon}-minute horizon")
+    logger.info(f"Look back window: {look_back} minutes, Data history: {hours_data} hours")
     logger.info(f"{'='*50}")
     
-    # Train all three model types for BERA log-return
-    bera_results = {}
-    
-    logger.info(f"Starting RandomForest training for {token_name} Log-Return")
-    rf_metrics = train_and_save_log_return_model(token_name, look_back, prediction_horizon, hours_data, 'rf')
-    if rf_metrics:
-        bera_results['rf'] = rf_metrics
-    
-    logger.info(f"Starting XGBoost training for {token_name} Log-Return")
-    xgb_metrics = train_and_save_log_return_model(token_name, look_back, prediction_horizon, hours_data, 'xgb')
-    if xgb_metrics:
-        bera_results['xgb'] = xgb_metrics
-    
-    logger.info(f"Starting LSTM training for {token_name} Log-Return")
-    lstm_metrics = train_and_save_log_return_model(token_name, look_back, prediction_horizon, hours_data, 'lstm')
-    if lstm_metrics:
-        bera_results['lstm'] = lstm_metrics
+    # Train all model types for BERA log-return
+    bera_results = train_log_return_models(token_name, look_back, prediction_horizon, hours_data)
     
     # Save comparison for BERA log-return
     if bera_results:
@@ -1294,78 +1037,6 @@ if __name__ == "__main__":
         plt.tight_layout()
         plt.savefig(os.path.join(MODELS_DIR, f'{token_name.lower()}_logreturn_comparison_{prediction_horizon}m.png'))
     
-    # Train models for ETH/USD volatility prediction with 6-hour horizon
-    token_name = "ethusd"
-    horizon_name = "360m"
-    look_back, prediction_horizon = time_horizons[horizon_name]
-    hours_data = data_requirements[horizon_name]
-    logger.info(f"\n{'='*50}")
-    logger.info(f"Training Volatility Prediction models for {token_name.upper()} with {prediction_horizon}-minute horizon")
-    logger.info(f"{'='*50}")
-    
-    # Train all three model types for ETH volatility
-    eth_results = {}
-    
-    logger.info(f"Starting RandomForest training for {token_name} Volatility")
-    rf_metrics = train_and_save_volatility_model(token_name, look_back, prediction_horizon, hours_data, 'rf')
-    if rf_metrics:
-        eth_results['rf'] = rf_metrics
-    
-    logger.info(f"Starting XGBoost training for {token_name} Volatility")
-    xgb_metrics = train_and_save_volatility_model(token_name, look_back, prediction_horizon, hours_data, 'xgb')
-    if xgb_metrics:
-        eth_results['xgb'] = xgb_metrics
-    
-    logger.info(f"Starting LSTM training for {token_name} Volatility")
-    lstm_metrics = train_and_save_volatility_model(token_name, look_back, prediction_horizon, hours_data, 'lstm')
-    if lstm_metrics:
-        eth_results['lstm'] = lstm_metrics
-    
-    # Save comparison for ETH volatility
-    if eth_results:
-        comparison_path = os.path.join(MODELS_DIR, f'{token_name.lower()}_volatility_comparison_{prediction_horizon}m.json')
-        with open(comparison_path, 'w') as f:
-            json.dump(eth_results, f)
-        
-        # Determine best model by RMSE (lower is better)
-        best_eth_model = min(eth_results.items(), key=lambda x: x[1]['rmse'])[0]
-        logger.info(f"Best model for {token_name} volatility: {best_eth_model} (RMSE: {eth_results[best_eth_model]['rmse']})")
-        
-        # Create comparison plots for ETH volatility
-        plt.figure(figsize=(15, 10))
-        
-        # RMSE comparison (lower is better)
-        plt.subplot(2, 2, 1)
-        models = list(eth_results.keys())
-        rmse_values = [eth_results[model]['rmse'] for model in models]
-        plt.bar(models, rmse_values)
-        plt.title('RMSE Comparison (Lower is Better)')
-        plt.ylabel('RMSE')
-        
-        # MAE comparison (lower is better)
-        plt.subplot(2, 2, 2)
-        mae_values = [eth_results[model]['mae'] for model in models]
-        plt.bar(models, mae_values)
-        plt.title('MAE Comparison (Lower is Better)')
-        plt.ylabel('MAE')
-        
-        # R² comparison (higher is better)
-        plt.subplot(2, 2, 3)
-        r2_values = [eth_results[model]['r2'] for model in models]
-        plt.bar(models, r2_values)
-        plt.title('R² Comparison (Higher is Better)')
-        plt.ylabel('R²')
-        
-        # MAPE comparison (lower is better)
-        plt.subplot(2, 2, 4)
-        mape_values = [eth_results[model]['mape'] for model in models]
-        plt.bar(models, mape_values)
-        plt.title('MAPE Comparison (Lower is Better)')
-        plt.ylabel('MAPE (%)')
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(MODELS_DIR, f'{token_name.lower()}_volatility_comparison_{prediction_horizon}m.png'))
-    
     # Print summary of all models
     logger.info("\nSummary of Models:")
     
@@ -1375,12 +1046,5 @@ if __name__ == "__main__":
         logger.info(f"  Directional Accuracy: {bera_results[best_bera_model]['directional_accuracy']}%")
     else:
         logger.info("BERA/USD Log-Return (60m): No model trained")
-    
-    if eth_results:
-        logger.info(f"ETH/USD Volatility (360m): {best_eth_model}")
-        logger.info(f"  RMSE: {eth_results[best_eth_model]['rmse']}")
-        logger.info(f"  MAPE: {eth_results[best_eth_model]['mape']}%")
-    else:
-        logger.info("ETH/USD Volatility (360m): No model trained")
     
     logger.info("Training process completed!")
