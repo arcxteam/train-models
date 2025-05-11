@@ -32,6 +32,9 @@ RUN pip install tensorflow-cpu==2.13.0
 # Ensure XGBoost is installed WITH cache
 RUN pip install xgboost==1.7.6
 
+# Ensure LGBM is installed WITH cache
+RUN pip install lightgbm==4.0.0
+
 # Enable multi-threading for CPU optimization
 # These control how many CPU cores are used by numerical libraries
 ENV OMP_NUM_THREADS=4
