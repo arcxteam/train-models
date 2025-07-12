@@ -9,6 +9,4 @@ keepalive = 5
 worker_class = "gthread"
 workers = 2
 threads = 6
-bind = "0.0.0.0:8001"
-bind = "0.0.0.0:8002"
-bind = "0.0.0.0:8003"
+bind = "0.0.0.0:8000"
