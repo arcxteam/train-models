@@ -4,55 +4,32 @@ services:
     build:
       context: .
       dockerfile: Dockerfile_updater
-    entrypoint: ["sh", "-c", "while true; do sleep 60; python -u /app/update_app.py; done"]
+    entrypoint: ["sh", "-c", "while true; do sleep 120; python -u /app/updater.py; done"]
     environment:
-      - TOKENS=ETH:ethereum,BERA:berachain
-      - ALLORA_VALIDATOR_API_URL=https://allora-api.testnet.allora.network/
-      - DATABASE_PATH=/app/data/prices.db
-      - CGC_API_KEY=CG-xxxxxxxxx
+      - TOKENS=paxgusd
+      - TIINGO_API_TOKEN=xxa99de96faaf30fc292a9c5b785974efa85708646
+      - TIINGO_DATA_DIR=/app/data/tiingo_data
+      - TIINGO_CACHE_TTL=150
     volumes:
       - ./source-data:/app/data
     restart: unless-stopped
 
-  source-01:
-    container_name: source-01
+  inference:
+    container_name: inference
     build: .
     environment:
-      - DATABASE_PATH=/app/data/prices.db
-      - API_PORT=8001
-      - ALLORA_VALIDATOR_API_URL=https://allora-api.testnet.allora.network/
-      - TOKENS=BERA:berachain
-      - INTERVAL_STEPS=60
-      - LOOK_BACK=60
-      - PREDICTION_STEPS=60
+      - API_PORT=8000
+      - TOKENS=paxgusd
+      - LOOK_BACK=240
+      - PREDICTION_HORIZON=1440
+      - TIINGO_API_TOKEN=xxa99de96faaf30fc292a9c5b785974efa85708646
+      - TIINGO_DATA_DIR=/app/data/tiingo_data
+      - TIINGO_CACHE_TTL=150
+      - MODELS_DIR=/app/models
     ports:
-      - "8001:8001"
-    # Delete Health check
+      - "8000:8000"
     command: >
-      sh -c "python init_data.py && gunicorn --preload --bind 0.0.0.0:8001 --log-level info --error-logfile - --access-logfile -
-      --worker-tmp-dir /dev/shm --graceful-timeout 120 --timeout 30 --keep-alive 5
-      --worker-class gthread --workers 2 --threads 6 app:app"
-    volumes:
-      - ./source-data:/app/data
-      - ./models:/app/models
-    restart: unless-stopped
-
-  source-02:
-    container_name: source-02
-    build: .
-    environment:
-      - DATABASE_PATH=/app/data/prices.db
-      - API_PORT=8002
-      - ALLORA_VALIDATOR_API_URL=https://allora-api.testnet.allora.network/
-      - TOKENS=ETH:ethereum
-      - INTERVAL_STEPS=360
-      - LOOK_BACK=72
-      - PREDICTION_STEPS=360
-    ports:
-      - "8002:8002"
-    # Delete Health check
-    command: >
-      sh -c "python init_data.py && gunicorn --preload --bind 0.0.0.0:8002 --log-level info --error-logfile - --access-logfile -
+      sh -c "python init_data.py && gunicorn --preload --bind 0.0.0.0:8000 --log-level info --error-logfile - --access-logfile -
       --worker-tmp-dir /dev/shm --graceful-timeout 120 --timeout 30 --keep-alive 5
       --worker-class gthread --workers 2 --threads 6 app:app"
     volumes:
@@ -62,12 +39,11 @@ services:
 
   allora-worker:
     container_name: allora-worker
-    image: alloranetwork/allora-offchain-node:v0.9.1
+    image: alloranetwork/allora-offchain-node:v0.12.0
     volumes:
       - ./worker-data:/data
     depends_on:
-      - source-01
-      - source-02
+      - inference
     env_file:
       - ./worker-data/env_file
     restart: unless-stopped
