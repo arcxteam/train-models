@@ -46,7 +46,7 @@ ENV OPENBLAS_NUM_THREADS=4
 FROM project_env
 
 # Copy the application code
-COPY train_models.py app_config.py app_utils.py ./
+COPY trainmodel.py config.py utils.py ./
 
 # Set the environment variable for TensorFlow to use CPU
 # HIDDEN : ENV TF_FORCE_GPU_ALLOW_GROWTH=true
@@ -56,5 +56,5 @@ COPY train_models.py app_config.py app_utils.py ./
 # HIDDEN : ENV PATH=/usr/local/cuda/bin:$PATH
 
 # Run the training script
-# CMD ["python", "train_models.py"] version old
-CMD ["/bin/sh", "-c", "python train_models.py && exit 0"]
+# CMD ["python", "trainmodel.py"] version old
+CMD ["/bin/sh", "-c", "python trainmodel.py && exit 0"]
