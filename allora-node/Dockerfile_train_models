@@ -56,4 +56,5 @@ COPY train_models.py app_config.py app_utils.py ./
 # HIDDEN : ENV PATH=/usr/local/cuda/bin:$PATH
 
 # Run the training script
-CMD ["python", "train_models.py"]
+# CMD ["python", "train_models.py"] version old
+CMD ["/bin/sh", "-c", "python train_models.py && exit 0"]
