@@ -18,10 +18,10 @@ RUN pip install --upgrade pip setuptools \
 FROM project_env
 
 # Copy application files
-COPY update_app.py app_config.py app_utils.py /app/
+COPY updater.py config.py utils.py /app/
 
 # Create necessary cache directories
 RUN mkdir -p /app/data/tiingo_data
 
 # Set the entrypoint command
-ENTRYPOINT ["sh", "-c", "while true; do python -u /app/update_app.py; sleep 60; done"]
+ENTRYPOINT ["sh", "-c", "while true; do python -u /app/updater.py; sleep 60; done"]
