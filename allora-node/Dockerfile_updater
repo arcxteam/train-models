@@ -4,14 +4,24 @@ FROM amd64/python:3.10-slim as project_env
 # Set the working directory in the container
 WORKDIR /app
 
-# Install dependencies
+# Install system dependencies (including libgomp1)
+RUN apt-get update && apt-get install -y \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
 COPY updater-requirements.txt updater-requirements.txt
 RUN pip install --upgrade pip setuptools \
-    && pip install --timeout=360 -r updater-requirements.txt
+    && pip install --timeout=360 -r updater-requirements.txt \
+    && pip install pandas numpy retrying requests
 
 FROM project_env
 
+# Copy application files
 COPY update_app.py app_config.py app_utils.py /app/
 
+# Create necessary cache directories
+RUN mkdir -p /app/data/tiingo_data
+
 # Set the entrypoint command
-ENTRYPOINT ["sh", "-c", "while true; sleep 60; do python -u /app/update_app.py; done"]
+ENTRYPOINT ["sh", "-c", "while true; do python -u /app/update_app.py; sleep 60; done"]
