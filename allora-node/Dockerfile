@@ -20,7 +20,7 @@ RUN pip install tensorflow-cpu==2.13.0
 # Second stage for cleaner image
 FROM project_env
 
-COPY gunicorn_conf.py app.py app_config.py app_utils.py init_data.py /app/
+COPY gunicorn_conf.py app.py config.py utils.py init_data.py /app/
 
 # Set the entrypoint command
 CMD ["gunicorn", "--conf", "/app/gunicorn_conf.py", "app:app"]
