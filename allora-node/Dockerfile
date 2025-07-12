@@ -4,6 +4,11 @@ FROM python:3.10-slim as project_env
 # Set the working directory in the container
 WORKDIR /app
 
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies
 COPY requirements.txt requirements.txt
 RUN pip install --upgrade pip setuptools \
