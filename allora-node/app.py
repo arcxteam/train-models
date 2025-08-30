@@ -9,27 +9,19 @@ import traceback
 import time
 from datetime import datetime
 from flask import Flask, Response, jsonify
-import tensorflow as tf
-from tensorflow.keras.models import load_model
-from utils import load_tiingo_data, prepare_features_for_prediction, get_coingecko_price, calculate_zptae, smooth_predictions
+from utils import load_tiingo_data, prepare_features_for_prediction, create_features_for_inference, get_coingecko_prices
 
 # Konfigurasi logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(), logging.FileHandler('paxg_prediction_api.log')]
+    handlers=[logging.StreamHandler(), logging.FileHandler('prediction_api.log')]
 )
 logger = logging.getLogger(__name__)
 
-# Optimasi fungsi prediksi untuk mengurangi retracing
-@tf.function(reduce_retracing=True)
-def predict_with_model(model, input_data):
-    """Fungsi prediksi yang di-cache untuk mengurangi retracing"""
-    return model(input_data, training=False)
-
 # Import app_config
 try:
-    from app_config import DATA_BASE_PATH, TIINGO_API_TOKEN, TIINGO_DATA_DIR, TIINGO_CACHE_TTL
+    from config import DATA_BASE_PATH, TIINGO_API_TOKEN, TIINGO_DATA_DIR, TIINGO_CACHE_TTL
 except ImportError:
     logger.warning("Gagal mengimpor dari app_config. Mengatur path default.")
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -52,14 +44,15 @@ elif not os.path.exists(MODELS_DIR) and os.path.exists('/root/forge/allora/model
 
 API_PORT = int(os.environ.get('API_PORT', 8000))
 LOOK_BACK = int(os.environ.get('LOOK_BACK', 60))
-PREDICTION_HORIZON = int(os.environ.get('PREDICTION_HORIZON', 1440))
+PREDICTION_HORIZON = int(os.environ.get('PREDICTION_HORIZON', 480))
 
 TOKEN_INFO = {
-    'paxgusd': {
-        'full_name': 'PAXG',
+    'btcusd': {
+        'full_name': 'BTC',
         'model_type': 'logreturn',
-        'prediction_horizon': 1440,
-        'look_back': 60
+        'prediction_horizon': 480,
+        'look_back': 60,
+        'coingecko_id': 'bitcoin'
     }
 }
 
@@ -95,7 +88,7 @@ def get_best_model(comparison_data):
     Args:
         comparison_data (dict): Dictionary dengan data perbandingan model
     Returns:
-        str: Tipe model terbaik ('lstm', 'lgbm', atau 'xgb')
+        str: Tipe model terbaik ('lgbm', atau 'xgb')
     """
     if not comparison_data:
         logger.warning("Tidak ada data perbandingan, menggunakan default LightGBM")
@@ -110,12 +103,12 @@ def get_best_model(comparison_data):
 
 def determine_best_model(token_name, prediction_horizon):
     """
-    Menentukan model terbaik untuk PAXG berdasarkan metrik
+    Menentukan model terbaik untuk token berdasarkan metrik
     Args:
-        token_name (str): Nama token (huruf kecil, misalnya 'paxgusd')
+        token_name (str): Nama token (huruf kecil, misalnya 'btcusd')
         prediction_horizon (int): Horizon prediksi dalam menit
     Returns:
-        str: Tipe model ('lstm', 'lgbm', atau 'xgb')
+        str: Tipe model ('lgbm', atau 'xgb')
     """
     cache_key = f"{token_name}_{prediction_horizon}"
     json_path = os.path.join(MODELS_DIR, f"{token_name}_logreturn_comparison_{prediction_horizon}m.json")
@@ -140,14 +133,14 @@ def load_model_and_scaler(token_name, prediction_horizon):
     Memuat model dan scaler yang sesuai
     
     Args:
-        token_name (str): Nama token (huruf kecil, misalnya 'paxgusd')
+        token_name (str): Nama token (huruf kecil, misalnya 'btcusd')
         prediction_horizon (int): Horizon prediksi dalam menit
         
     Returns:
         tuple: (model, scaler, model_type)
     """
     best_model_type = determine_best_model(token_name, prediction_horizon)
-    model_path = os.path.join(MODELS_DIR, f'{token_name}_logreturn_{best_model_type}_model_{prediction_horizon}m.pkl' if best_model_type != 'lstm' else f'{token_name}_logreturn_lstm_model_{prediction_horizon}m.keras')
+    model_path = os.path.join(MODELS_DIR, f'{token_name}_logreturn_{best_model_type}_model_{prediction_horizon}m.pkl')
     scaler_path = os.path.join(MODELS_DIR, f'{token_name}_logreturn_{best_model_type}_scaler_{prediction_horizon}m.pkl')
     
     logger.info(f"Mencoba memuat model {best_model_type} dari: {model_path}")
@@ -155,7 +148,7 @@ def load_model_and_scaler(token_name, prediction_horizon):
     
     if os.path.exists(model_path) and os.path.exists(scaler_path):
         try:
-            model = load_model(model_path) if best_model_type == 'lstm' else joblib.load(model_path)
+            model = joblib.load(model_path)
             scaler = joblib.load(scaler_path)
             logger.info(f"Scaler mengharapkan {scaler.n_features_in_} fitur")
             logger.info(f"Berhasil memuat model {best_model_type.upper()} untuk {token_name}")
@@ -163,13 +156,13 @@ def load_model_and_scaler(token_name, prediction_horizon):
         except Exception as e:
             logger.error(f"Error memuat model {best_model_type} untuk {token_name}: {e}")
     
-    fallback_order = ['lgbm', 'xgb', 'lstm'] if best_model_type != 'lgbm' else ['xgb', 'lstm']
+    fallback_order = ['lgbm', 'xgb'] if best_model_type != 'lgbm' else ['xgb']
     for model_type in fallback_order:
-        model_path = os.path.join(MODELS_DIR, f'{token_name}_logreturn_{model_type}_model_{prediction_horizon}m.pkl' if model_type != 'lstm' else f'{token_name}_logreturn_lstm_model_{prediction_horizon}m.keras')
+        model_path = os.path.join(MODELS_DIR, f'{token_name}_logreturn_{model_type}_model_{prediction_horizon}m.pkl')
         scaler_path = os.path.join(MODELS_DIR, f'{token_name}_logreturn_{model_type}_scaler_{prediction_horizon}m.pkl')
         if os.path.exists(model_path) and os.path.exists(scaler_path):
             try:
-                model = load_model(model_path) if model_type == 'lstm' else joblib.load(model_path)
+                model = joblib.load(model_path)
                 scaler = joblib.load(scaler_path)
                 logger.info(f"Memuat model fallback {model_type.upper()} untuk {token_name}")
                 logger.info(f"Scaler mengharapkan {scaler.n_features_in_} fitur")
@@ -207,20 +200,14 @@ def track_prediction(token_name, predicted_price, latest_price, timestamp):
 
 def cached_prediction(token_name, prediction_horizon):
     """
-    Menghasilkan prediksi harga dengan caching (TTL 150 detik)
-    
-    Args:
-        token_name (str): Nama token
-        prediction_horizon (int): Horizon prediksi dalam menit
-        
-    Returns:
-        float: Harga prediksi atau None jika gagal
+    Menghasilkan prediksi harga dengan pipeline yang diperbaiki
+    Hanya untuk internal tracking, bukan untuk blockchain
     """
     cache_key = f"{token_name}_{prediction_horizon}"
     if cache_key in PREDICTION_CACHE:
         cache_age = time.time() - PREDICTION_CACHE[cache_key]['timestamp']
-        if cache_age < TIINGO_CACHE_TTL:  # TTL diatur ke 150 detik
-            logger.info(f"Menggunakan prediksi cache untuk {token_name} ({cache_age:.1f}cek umur cache)")
+        if cache_age < TIINGO_CACHE_TTL:
+            logger.info(f"Menggunakan prediksi cache untuk {token_name} ({cache_age:.1f} detik umur cache)")
             return PREDICTION_CACHE[cache_key]['prediction']
     
     start_time = time.time()
@@ -236,25 +223,27 @@ def cached_prediction(token_name, prediction_horizon):
         logger.error(f"Gagal memuat model untuk {token_name}")
         return None
     
-    logger.info(f"Memuat model {model_type.upper()} dalam {model_load_time:.3f}s dengan fitur input: {scaler.n_features_in_}")
+    logger.info(f"Memuat model {model_type.upper()} dalam {model_load_time:.3f}s")
     
-    data_load_start = time.time()
+    # Gunakan hanya data Tiingo untuk konsistensi
     data = load_tiingo_data(token_name)
-    data_load_time = time.time() - data_load_start
-    
     if data is None or data[0] is None or len(data[0]) < look_back:
-        logger.error(f"Data tidak cukup untuk prediksi {token_name}: perlu {look_back}, dapat {len(data[0]) if data and data[0] is not None else 0}")
+        logger.error(f"Data tidak cukup untuk prediksi {token_name}: perlu {look_back}")
         return None
     
     df, _ = data
-    coingecko_price, _ = get_coingecko_price()
-    if coingecko_price is None:
-        logger.warning("Gagal mengambil harga real-time dari CoinGecko, menggunakan harga terakhir dari Tiingo")
-        coingecko_price = float(df['close'].iloc[-1])
+    
+    # Gunakan harga Tiingo terakhir untuk konsistensi
+    latest_price = float(df['close'].iloc[-1])
+    latest_timestamp = int(df['timestamp'].iloc[-1])
+    
+    logger.info(f"Data terbaru dari Tiingo: {df['date'].iloc[-1]}, Harga terakhir: {latest_price:.4f}")
+    
+    # Siapkan fitur dengan data Tiingo
     df_pred = df.tail(look_back).copy()
-    latest_price = float(coingecko_price)
-    latest_timestamp = int(df_pred['timestamp'].iloc[-1])
-    logger.info(f"Data terbaru dari Tiingo: {df['date'].iloc[-1]}, Harga terakhir: {df['close'].iloc[-1]:.4f}")
+    
+    # Gunakan feature engineering yang konsisten
+    df_pred = create_features_for_inference(df_pred)
     
     preprocess_start = time.time()
     X_pred = prepare_features_for_prediction(df_pred, look_back, scaler, model_type=model_type)
@@ -264,64 +253,43 @@ def cached_prediction(token_name, prediction_horizon):
         return None
     
     logger.info(f"Bentuk input {model_type.upper()}: {X_pred.shape}")
-    logger.info(f"X_pred sample values: {X_pred.flatten()[:5]}")
-    preprocess_time = time.time() - preprocess_start
     
     try:
         predict_start = time.time()
-        
-        if model_type == 'lstm':
-            X_pred = X_pred.astype(np.float32)
-            logger.info(f"Input shape: {X_pred.shape}, dtype: {X_pred.dtype}")
-            pred_tensor = predict_with_model(model, tf.constant(X_pred))
-            pred = pred_tensor.numpy()
-        else:
-            pred = model.predict(X_pred)
-        
+        pred = model.predict(X_pred)
         predict_time = time.time() - predict_start
-        logger.info(f"Raw prediction: {pred}")
         
+        # Handle prediction output
         if isinstance(pred, (np.ndarray, list)):
-            if len(pred) > 0:
-                if isinstance(pred[0], (np.ndarray, list)):
-                    log_return = float(pred[0][0])
-                else:
-                    log_return = float(pred[0])
-            else:
-                log_return = 0.0
+            log_return = float(pred[0]) if len(pred) > 0 else 0.0
         else:
             log_return = float(pred)
         
-        prediction_value = latest_price * np.exp(log_return)
-        direction = "UP" if prediction_value > latest_price else "DOWN"
-        change_pct = float(((prediction_value - latest_price) / latest_price) * 100)
+        # Validasi log return yang reasonable untuk internal tracking
+        if abs(log_return) > 0.5:
+            logger.warning(f"Log return prediksi tidak realistic: {log_return}, clamping")
+            log_return = np.clip(log_return, -0.1, 0.1)
         
+        prediction_value = latest_price * np.exp(log_return)
+        
+        # Lacak prediksi
         track_prediction(token_name, prediction_value, latest_price, latest_timestamp)
         
         total_prediction_time = time.time() - start_time
         
-        logger.info(f"=== Prediksi untuk {token_name.upper()} (Model: {model_type.upper()}) ===")
-        logger.info(f"  Horizon: {prediction_horizon} menit")
-        logger.info(f"  Timestamp: {latest_timestamp}")
-        logger.info(f"  Harga Terkini: ${latest_price:.6f}")
-        logger.info(f"  Harga Prediksi: ${prediction_value:.6f}")
-        logger.info(f"  Log Return: {log_return:.6f}")
-        logger.info(f"  Arah: {direction} ({change_pct:.2f}%)")
-        logger.info(f"  Sumber Data: Tiingo Cache + CoinGecko")
-        logger.info(f"  Performa: Model Load={model_load_time:.3f}s, Data Load={data_load_time:.3f}s, Preprocess={preprocess_time:.3f}s, Predict={predict_time:.3f}s, Total={total_prediction_time:.3f}s")
+        logger.info(f"Prediksi internal untuk {token_name.upper()}: Log Return={log_return}, Harga=${prediction_value:.4f}")
         
         PREDICTION_CACHE[cache_key] = {
             'prediction': float(prediction_value),
             'timestamp': time.time(),
             'log_return': float(log_return),
             'latest_price': float(latest_price),
-            'change_pct': change_pct,
-            'direction': direction,
             'model_type': model_type,
-            'data_source': 'Tiingo Cache + CoinGecko'
+            'data_source': 'Tiingo'
         }
         
         return prediction_value
+        
     except Exception as e:
         logger.error(f"Error selama prediksi untuk {token_name}: {e}")
         logger.error(traceback.format_exc())
@@ -329,7 +297,7 @@ def cached_prediction(token_name, prediction_horizon):
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Welcome to PAXG Log-return Prediction API", HTTP_RESPONSE_CODE_200
+    return "Welcome to Price Prediction API", HTTP_RESPONSE_CODE_200
 
 @app.route('/health', methods=['GET'])
 async def health_check():
@@ -344,11 +312,13 @@ def predict_log_return(token):
     """
     logger.info(f"Raw token received: '{token}' (length: {len(token)})")
 
-    if token.strip().upper() != "PAXG":
+    token_upper = token.strip().upper()
+    token_map = {'BTC': 'btcusd'}
+    if token_upper not in token_map:
         logger.error(f"Invalid token: '{token}'")
-        return Response(json.dumps({"error": f"Token {token} tidak didukung, hanya PAXG yang tersedia"}), status=404, mimetype='application/json')
+        return Response(json.dumps({"error": f"Token {token} tidak didukung"}), status=404, mimetype='application/json')
 
-    token_name = "paxgusd"
+    token_name = token_map[token_upper]
     prediction_horizon = TOKEN_INFO[token_name]['prediction_horizon']
     look_back = TOKEN_INFO[token_name]['look_back']
 
@@ -359,14 +329,14 @@ def predict_log_return(token):
             logger.error("Gagal memuat data dari Tiingo")
             return Response(json.dumps({"error": "Data tidak tersedia"}), status=404, mimetype='application/json')
         
-        df, coingecko_price = data
+        df, _ = data
         logger.info(f"Data setelah load_tiingo_data: {len(df)} records")
 
         if df is None or len(df) < look_back:
             logger.error(f"Data tidak cukup: perlu {look_back}, dapat {len(df) if df is not None else 0}")
             return Response(json.dumps({"error": "Data tidak cukup"}), status=404, mimetype='application/json')
 
-        # Ambil 60 baris terakhir untuk inferensi
+        # Ambil look back baris terakhir untuk inferensi 
         df_pred = df.tail(look_back).copy()
         logger.info(f"Data untuk prediksi: {len(df_pred)} records (look_back: {look_back})")
 
@@ -376,32 +346,23 @@ def predict_log_return(token):
             logger.error("Model atau scaler tidak tersedia")
             return Response(json.dumps({"error": "Model prediksi tidak tersedia"}), status=500, mimetype='application/json')
 
+        # Gunakan fungsi feature engineering yang konsisten
+        df_pred = create_features_for_inference(df_pred)
+        
         # Siapkan fitur untuk prediksi
-        X_pred = prepare_features_for_prediction(df_pred, look_back, scaler, model_type)
+        X_pred = prepare_features_for_prediction(df_pred, look_back, scaler, model_type=model_type)
         if X_pred is None:
-            logger.error("Gagal mempersiapkan fitur")
+            logger.error("Gagal menyiapkan fitur")
             return Response(json.dumps({"error": "Gagal mempersiapkan fitur"}), status=500, mimetype='application/json')
 
         # Periksa kecocokan fitur berdasarkan tipe model
         logger.info(f"Input shape: {X_pred.shape}, expected features: {scaler.n_features_in_}")
-        if model_type == 'lstm':
-            if X_pred.shape[2] != scaler.n_features_in_:
-                logger.error(f"Feature mismatch for LSTM: expected {scaler.n_features_in_}, got {X_pred.shape[2]}")
-                return Response(json.dumps({"error": "Feature mismatch for LSTM"}), status=500, mimetype='application/json')
-        else:
-            if X_pred.shape[1] != scaler.n_features_in_:
-                logger.error(f"Feature mismatch: expected {scaler.n_features_in_}, got {X_pred.shape[1]}")
-                return Response(json.dumps({"error": "Feature mismatch"}), status=500, mimetype='application/json')
+        if X_pred.shape[1] != scaler.n_features_in_:
+            logger.error(f"Feature mismatch: expected {scaler.n_features_in_}, got {X_pred.shape[1]}")
+            return Response(json.dumps({"error": "Feature mismatch"}), status=500, mimetype='application/json')
 
         # Lakukan prediksi log return
-        if model_type == 'lstm':
-            # Optimasi untuk LSTM: gunakan fungsi yang di-cache
-            X_pred = X_pred.astype(np.float32)
-            logger.info(f"LSTM input shape: {X_pred.shape}, dtype: {X_pred.dtype}")
-            pred_tensor = predict_with_model(model, tf.constant(X_pred))
-            pred = pred_tensor.numpy()
-        else:
-            pred = model.predict(X_pred)
+        pred = model.predict(X_pred)
         
         # Konversi prediksi menjadi float tunggal
         if isinstance(pred, (np.ndarray, list)):
@@ -415,46 +376,50 @@ def predict_log_return(token):
         else:
             log_return = float(pred)
 
-        # Gunakan coingecko_price dari load_tiingo_data jika tersedia, atau ambil dari CoinGecko
-        if coingecko_price is None:
-            coingecko_price, _ = get_coingecko_price()
-        if coingecko_price is None:
-            logger.error("Gagal mengambil harga real-time dari CoinGecko")
-            return Response(json.dumps({"error": "Harga real-time tidak tersedia"}), status=500, mimetype='application/json')
-
-        # HITUNG PREDICTED PRICE (PENTING UNTUK LOG RETURN)
-        predicted_price = coingecko_price * np.exp(log_return)
+        # Gunakan harga Tiingo untuk konsistensi
+        latest_price = float(df['close'].iloc[-1])
+        latest_timestamp = int(df['timestamp'].iloc[-1])
+        
+        # Hitung predicted price untuk tracking
+        predicted_price = latest_price * np.exp(log_return)
 
         # Log hasil prediksi
-        logger.info(f"Prediksi selesai - Token: PAXG, Log-return: {log_return:.6f}, "
-                    f"Harga saat ini: ${coingecko_price:.4f}, Harga prediksi: ${predicted_price:.4f}")
+        logger.info(f"Prediksi selesai - Token: {token_upper}, Log-return: {log_return}, "
+                    f"Harga saat ini: ${latest_price:.4f}, Harga prediksi: ${predicted_price:.4f}")
 
         # Simpan ke cache
         cache_key = f"{token_name}_{prediction_horizon}"
         PREDICTION_CACHE[cache_key] = {
             'timestamp': time.time(),
             'log_return': float(log_return),
-            'latest_price': float(coingecko_price),
+            'latest_price': float(latest_price),
             'prediction': float(predicted_price),
-            'data_source': 'Tiingo Cache + CoinGecko',
+            'data_source': 'Tiingo',
             'model_type': model_type
         }
 
         # Lacak prediksi
-        track_prediction(token_name, predicted_price, coingecko_price, int(df['timestamp'].iloc[-1]))
+        track_prediction(token_name, predicted_price, latest_price, latest_timestamp)
 
-        # Kembalikan nilai log-return
-        return Response(str(float(log_return)), status=200, mimetype='text/plain')
+        # Kembalikan nilai log-return ASLI tanpa formatting untuk blockchain
+        logger.info(f"Mengembalikan log-return ke blockchain: {log_return}")
+        
+        return Response(str(log_return), status=200, mimetype='text/plain')
 
     except Exception as e:
         logger.error(f"Error memproses prediksi log-return: {e}\n{traceback.format_exc()}")
         return Response(json.dumps({"error": str(e)}), status=500, mimetype='application/json')
 
-@app.route('/performance/paxg', methods=['GET'])
-async def paxg_performance():
-    """Mengembalikan metrik performa dan informasi model untuk PAXG"""
+@app.route('/performance/<token>', methods=['GET'])
+async def performance(token):
+    """Mengembalikan metrik performa dan informasi model untuk token"""
     try:
-        token_name = "paxgusd"
+        token_upper = token.strip().upper()
+        token_map = {'BTC': 'btcusd'}
+        if token_upper not in token_map:
+            return jsonify({"status": "error", "message": f"Token {token} tidak didukung"})
+
+        token_name = token_map[token_upper]
         prediction_horizon = TOKEN_INFO[token_name]['prediction_horizon']
         
         # Muat data perbandingan model
@@ -504,7 +469,7 @@ async def paxg_performance():
         
         return jsonify({
             "status": "success",
-            "token": "PAXG",
+            "token": token_upper,
             "current_price": float(current_price),
             "current_timestamp": current_timestamp,
             "predicted_price": float(prediction),
@@ -516,7 +481,7 @@ async def paxg_performance():
             "accuracy_metrics": accuracy_metrics if accuracy_metrics else None,
             "model_info": {
                 "model_type": best_model.upper(),
-                "model_path": os.path.join(MODELS_DIR, f'{token_name}_logreturn_{best_model}_model_{prediction_horizon}m.pkl' if best_model != 'lstm' else f'{token_name}_logreturn_lstm_model_{prediction_horizon}m.keras'),
+                "model_path": os.path.join(MODELS_DIR, f'{token_name}_logreturn_{best_model}_model_{prediction_horizon}m.pkl'),
                 "look_back_window": TOKEN_INFO[token_name]['look_back'],
                 "comparison_data": comparison_data,
                 "selection_criteria": "ZPTAE (lebih rendah lebih baik) & Akurasi Arah (lebih tinggi lebih baik)"
@@ -530,7 +495,7 @@ async def paxg_performance():
 if __name__ == '__main__':
     MODEL_SELECTION_CACHE.clear()  # Bersihkan cache saat aplikasi dimulai
     logger.info("=" * 50)
-    logger.info("PAXG PRICE PREDICTION API")
+    logger.info("PRICE PREDICTION API")
     logger.info("=" * 50)
     
     logger.info("Konfigurasi model:")
@@ -543,14 +508,14 @@ if __name__ == '__main__':
     if not os.path.exists(MODELS_DIR):
         logger.warning(f"Direktori model tidak ditemukan: {MODELS_DIR}")
     else:
-        model_files = [f for f in os.listdir(MODELS_DIR) if f.endswith(('.keras', '.pkl'))]
+        model_files = [f for f in os.listdir(MODELS_DIR) if f.endswith('.pkl')]
         comparison_files = [f for f in os.listdir(MODELS_DIR) if f.endswith('.json')]
         logger.info(f"Ditemukan {len(model_files)} file model dan {len(comparison_files)} file perbandingan")
         
-        token_name = "paxgusd"
-        prediction_horizon = TOKEN_INFO[token_name]['prediction_horizon']
-        best_model = determine_best_model(token_name, prediction_horizon)
-        logger.info(f"Model terbaik untuk PAXG ({prediction_horizon}m): {best_model.upper()}")
+        for token in TOKEN_INFO:
+            prediction_horizon = TOKEN_INFO[token]['prediction_horizon']
+            best_model = determine_best_model(token, prediction_horizon)
+            logger.info(f"Model terbaik untuk {TOKEN_INFO[token]['full_name']} ({prediction_horizon}m): {best_model.upper()}")
     
     os.makedirs(TIINGO_DATA_DIR, exist_ok=True)
     logger.info(f"Direktori cache dibuat: Tiingo={TIINGO_DATA_DIR}")
