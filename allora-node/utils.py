@@ -10,7 +10,7 @@ from sklearn.preprocessing import MinMaxScaler
 from scipy import stats
 from datetime import datetime, timedelta
 
-# Import dari app_config
+# Import dari config
 try:
     from config import DATA_BASE_PATH, TIINGO_API_TOKEN, TIINGO_CACHE_TTL
 except ImportError:
@@ -64,8 +64,9 @@ def _increment_tiingo_counters():
     _tiingo_request_count_hourly += 1
     _tiingo_request_count_daily += 1
 
-def _get_tiingo_cache_path(resample_freq):
-    return os.path.join(TIINGO_DATA_DIR, f"tiingo_data_{resample_freq}.json")
+def _get_tiingo_cache_path(ticker, resample_freq):
+    base_ticker = ticker.lower()
+    return os.path.join(TIINGO_DATA_DIR, f"tiingo_data_{resample_freq}_{base_ticker}.json")
 
 def _is_cache_valid(cache_path):
     if not os.path.exists(cache_path):
@@ -76,11 +77,11 @@ def _is_cache_valid(cache_path):
     
     return (current_time - file_mtime) < TIINGO_CACHE_TTL
 
-def get_tiingo_data(ticker="paxgusd", interval="5min", start_date=None, end_date=None):
+def get_tiingo_data(ticker, interval="5min", start_date=None, end_date=None):
     """
     Mengambil data OHLCV dari Tiingo API untuk kripto dengan rentang tanggal tertentu
     Args:
-        ticker (str): Simbol ticker (misalnya 'paxgusd')
+        ticker (str): Simbol ticker (misalnya 'btcusd')
         interval (str): Frekuensi data ('5min' default)
         start_date (str): Tanggal mulai (format 'YYYY-MM-DDTHH:MM:SSZ')
         end_date (str): Tanggal akhir (format 'YYYY-MM-DDTHH:MM:SSZ')
@@ -129,9 +130,9 @@ def get_tiingo_data(ticker="paxgusd", interval="5min", start_date=None, end_date
             logger.error(f"No data returned from Tiingo for {ticker_formatted} from {start_date} to {end_date}")
             return pd.DataFrame()
         
-        with open(os.path.join(TIINGO_DATA_DIR, f'tiingo_data_{interval}.json'), 'w') as f:
+        with open(_get_tiingo_cache_path(ticker, interval), 'w') as f:
             json.dump(data[0] if isinstance(data, list) else data, f, indent=4)
-        logger.info(f"Saved data to {TIINGO_DATA_DIR}/tiingo_data_{interval}.json")
+        logger.info(f"Saved data to {_get_tiingo_cache_path(ticker, interval)}")
         
         df = pd.DataFrame(data[0]['priceData'] if isinstance(data, list) else data[ticker_formatted]['priceData'])
         df['date'] = pd.to_datetime(df['date'])
@@ -146,16 +147,16 @@ def get_tiingo_data(ticker="paxgusd", interval="5min", start_date=None, end_date
         logger.error(f"IO Error saving data for {ticker_formatted}: {e}")
         return pd.DataFrame()
 
-def fetch_historical_data(ticker="paxgusd", resample_freq="5min"):
+def fetch_historical_data(ticker, resample_freq="5min"):
     end_date = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
-    start_date = '2025-06-08T00:00:00Z'
-    json_path = os.path.join(TIINGO_DATA_DIR, f"tiingo_data_{resample_freq}.json")
+    start_date = '2025-07-01T00:00:00Z'
+    json_path = _get_tiingo_cache_path(ticker, resample_freq)
 
-    all_data = {'paxgusd': {'priceData': []}}
+    all_data = {'priceData': []}
     current_end_date = datetime.strptime(end_date, '%Y-%m-%dT%H:%M:%SZ')
     current_start_date = datetime.strptime(start_date, '%Y-%m-%dT%H:%M:%SZ')
 
-    batch_days = 17 # Maximal 17 hari untuk 1x request dengan tf 5mins
+    batch_days = 17 # Maximal 17 hari untuk 1x request timeframe 5mins
     while current_start_date < current_end_date:
         batch_end_date = min(current_start_date + timedelta(days=batch_days), current_end_date)
         batch_start_date = current_start_date.strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -166,11 +167,11 @@ def fetch_historical_data(ticker="paxgusd", resample_freq="5min"):
         if not df.empty:
             # Pastikan date dalam format string ISO 8601
             df['date'] = df['date'].dt.strftime('%Y-%m-%dT%H:%M:%S+00:00')
-            existing_dates = {pd.to_datetime(d['date']).date() for d in all_data['paxgusd']['priceData']}
+            existing_dates = {pd.to_datetime(d['date']).date() for d in all_data['priceData']}
             new_data = df.to_dict('records')
             new_data = [d for d in new_data if pd.to_datetime(d['date']).date() not in existing_dates]
             if new_data:
-                all_data['paxgusd']['priceData'].extend(new_data)
+                all_data['priceData'].extend(new_data)
                 actual_start = min(pd.to_datetime(d['date']) for d in new_data).strftime('%Y-%m-%d')
                 actual_end = max(pd.to_datetime(d['date']) for d in new_data).strftime('%Y-%m-%d')
                 logger.info(f"Fetched {len(new_data)} new records from {actual_start} to {actual_end}")
@@ -181,11 +182,11 @@ def fetch_historical_data(ticker="paxgusd", resample_freq="5min"):
         
         current_start_date += timedelta(days=batch_days)
     
-    if all_data['paxgusd']['priceData']:
+    if all_data['priceData']:
         with open(json_path, 'w') as f:
             json.dump(all_data, f, indent=4)
-        logger.info(f"Data saved to {json_path} with {len(all_data['paxgusd']['priceData'])} records")
-        df_final = pd.DataFrame(all_data['paxgusd']['priceData'])
+        logger.info(f"Data saved to {json_path} with {len(all_data['priceData'])} records")
+        df_final = pd.DataFrame(all_data['priceData'])
         actual_start_date = df_final['date'].min()
         actual_end_date = df_final['date'].max()
         logger.info(f"Final data range: {actual_start_date} to {actual_end_date}")
@@ -194,11 +195,11 @@ def fetch_historical_data(ticker="paxgusd", resample_freq="5min"):
         logger.error(f"No data collected for historical data")
         return pd.DataFrame()
 
-def update_recent_data(ticker="paxgusd", resample_freq="5min", initial=False):
+def update_recent_data(ticker, resample_freq="5min", initial=False):
     """
     Mengupdate data terbaru dari Tiingo API
     Args:
-        ticker (str): Simbol ticker (misalnya 'paxgusd')
+        ticker (str): Simbol ticker (misalnya 'btcusd')
         resample_freq (str): Frekuensi data ('5min' default)
         initial (bool): Jika True, ambil data 100 jam terakhir
     Returns:
@@ -229,10 +230,10 @@ def update_recent_data(ticker="paxgusd", resample_freq="5min", initial=False):
                 df = pd.DataFrame(all_price_data)
                 df = df.sort_values('date', ascending=False).drop_duplicates(subset=['date'], keep='last')
                 # Tidak perlu konversi ke Timestamp, biarkan sebagai string
-                json_path = os.path.join(TIINGO_DATA_DIR, f"tiingo_data_{resample_freq}.json")
+                json_path = _get_tiingo_cache_path(ticker, resample_freq)
                 with open(json_path, 'r') as f:
                     existing_data = json.load(f)
-                existing_data['paxgusd']['priceData'].extend(df.to_dict('records'))
+                existing_data['priceData'].extend(df.to_dict('records'))
                 with open(json_path, 'w') as f:
                     json.dump(existing_data, f, indent=4)
                 actual_start_date = df['date'].min()
@@ -249,47 +250,54 @@ def update_recent_data(ticker="paxgusd", resample_freq="5min", initial=False):
         logger.error(f"Request failed for {start_date} to {end_date}: {e}")
         return pd.DataFrame()
 
-def get_coingecko_price():
+def get_coingecko_prices(tokens=['bitcoin']):
     """
-    Mendapatkan harga terkini PAXG dari CoinGecko API untuk log info saja
+    Mendapatkan harga terkini dari CoinGecko API untuk multiple tokens sebagai realtime price.
     
     Returns:
-        tuple: (price, timestamp) atau (None, None) jika gagal
+        dict: {token: (price, timestamp)} atau {} jika gagal
     """
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price?vs_currencies=usd&symbols=paxg&include_last_updated_at=true&precision=3"
+        symbols = ','.join(tokens)
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbols}&vs_currencies=usd&include_last_updated_at=true&precision=3"
         headers = {
             "accept": "application/json",
-            "x-cg-demo-api-key": "CG-XXcTraNZPUEmnQV5bD8yuQ3Nbs"
+            "x-cg-demo-api-key": "CG-cTraNZPUEmnQV5bD8yuQ3Nbs"
         }
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         
         data = response.json()
-        price = data['paxg']['usd']
-        timestamp = data['paxg']['last_updated_at']
-        timestamp_iso = datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+        prices = {}
+        for token in tokens:
+            if token in data:
+                price = data[token]['usd']
+                timestamp = data[token]['last_updated_at']
+                timestamp_iso = datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+                prices[token] = (price, timestamp_iso)
+                logger.info(f"CoinGecko real-time price for {token}: ${price} at timestamp {timestamp_iso}")  # Hanya untuk log info
+            else:
+                logger.warning(f"No data for {token} from CoinGecko")
         
-        logger.info(f"CoinGecko real-time price: ${price} at timestamp {timestamp_iso}")  # Hanya untuk log info
-        return price, timestamp
+        return prices
     
     except Exception as e:
-        logger.error(f"Error fetching price from CoinGecko: {e}")
+        logger.error(f"Error fetching prices from CoinGecko: {e}")
         logger.error(traceback.format_exc())
-        return None, None
+        return {}
 
 def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
     """
     Memuat data OHLCV dari file cache Tiingo JSON dengan logging detail
     Args:
-        token_name (str): Nama token (misalnya 'paxgusd')
+        token_name (str): Nama token (misalnya 'btcusd')
         cache_dir (str): Direktori cache Tiingo
         
     Returns:
         tuple: (pd.DataFrame, float) atau (None, None) jika gagal
     """
-    base_ticker = token_name.replace('usd', '').lower()
-    cache_path = os.path.join(cache_dir, "tiingo_data_5min.json")
+    base_ticker = token_name.lower()
+    cache_path = _get_tiingo_cache_path(token_name, "5min")
     
     # Cek keberadaan file cache
     if not os.path.exists(cache_path):
@@ -302,11 +310,11 @@ def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
             data = json.load(f)
         
         # Validasi struktur data
-        if 'paxgusd' not in data or 'priceData' not in data['paxgusd']:
-            logger.error(f"Invalid cache structure: 'paxgusd' or 'priceData' missing in {cache_path}")
+        if 'priceData' not in data:
+            logger.error(f"Invalid cache structure: 'priceData' missing in {cache_path}")
             return None, None
         
-        df = pd.DataFrame(data['paxgusd']['priceData'])
+        df = pd.DataFrame(data['priceData'])
         logger.info(f"Initial data loaded: {len(df)} records")
         
         # Jika DataFrame kosong, kembalikan None
@@ -346,7 +354,7 @@ def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
         logger.info(f"After removing duplicates: {len(df)} records")
         
         # Pastikan cukup data untuk prediksi
-        look_back = 60  # Sesuaikan dengan konfigurasi di app.py
+        look_back = 60  # Sesuaikan dengan konfigurasi di app.py dan trainmodel.py
         if len(df) < look_back:
             logger.error(f"Insufficient data: need at least {look_back} records, got {len(df)}")
             return None, None
@@ -355,8 +363,9 @@ def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
         coingecko_price = df['close'].iloc[-1] if not df.empty else None
         if coingecko_price is None or coingecko_price == 0:
             logger.warning("Last 'close' price is invalid, attempting to fetch from CoinGecko")
-            price, _ = get_coingecko_price()
-            coingecko_price = price if price is not None else None
+            coingecko_token = token_name.replace('usd', '').lower()  # Misal 'btc' untuk 'btcusd'
+            prices = get_coingecko_prices([coingecko_token])
+            coingecko_price = prices.get(coingecko_token, (None, None))[0] if prices else None
         
         logger.info(f"Final loaded data: {len(df)} records for {token_name}, date range: {df['date'].min()} to {df['date'].max()}")
         return df, coingecko_price
@@ -375,39 +384,15 @@ def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
         logger.error(traceback.format_exc())
         return None, None
 
-def calculate_log_returns(prices, period=1440):
-    """
-    Menghitung log returns untuk harga yang diberikan dengan periode tertentu.
-    Args:
-        prices (numpy.array or pandas.Series): Data harga
-        period (int): Periode untuk menghitung returns dalam data poin
-    Returns:
-        numpy.array: Array log returns
-    """
-    if isinstance(prices, np.ndarray):
-        if prices.ndim > 1:
-            prices = prices.flatten()
-    elif isinstance(prices, pd.Series):
-        prices = prices.values
-    else:
-        prices = np.array(prices)
-    
-    if len(prices) <= period:
-        logger.error(f"Tidak cukup titik data ({len(prices)}) untuk periode ({period})")
-        return np.array([])
-    
-    # log_returns = np.log(prices[period:] / prices[:-period])
-    log_returns = np.log((prices[period:] + 1e-8) / (prices[:-period] + 1e-8))
-    return log_returns
 
-def calculate_zptae(y_true, y_pred, sigma=None, alpha=1.5, window_size=100):
+def calculate_zptae(y_true, y_pred, sigma=None, alpha=0.5, window_size=100):
     """
     Menghitung Z-transformed Power-Tanh Absolute Error (ZPTAE) dengan optimasi.
     Args:
         y_true (numpy.array): Nilai aktual
         y_pred (numpy.array): Nilai prediksi
         sigma (float, optional): Standar deviasi untuk normalisasi
-        alpha (float): Parameter power-law untuk PowerTanh (default 1.5)
+        alpha (float): Parameter power-law untuk PowerTanh (default 0.5)
         window_size (int): Ukuran jendela untuk perhitungan std (default 100)
     Returns:
         float: Skor ZPTAE (lebih rendah lebih baik)
@@ -415,7 +400,7 @@ def calculate_zptae(y_true, y_pred, sigma=None, alpha=1.5, window_size=100):
     y_true = y_true.flatten()
     y_pred = y_pred.flatten()
     abs_errors = np.abs(y_true - y_pred)
-    abs_errors = np.clip(abs_errors, 0, np.percentile(abs_errors, 95))  # Batasi outlier
+    abs_errors = np.clip(abs_errors, 0, np.percentile(abs_errors, 99))  # Batasi outlier
     n = len(abs_errors)
     zptae_values = np.zeros(n)
     
@@ -458,67 +443,72 @@ def smooth_predictions(preds, alpha=0.1):
         smoothed.append(alpha * p + (1 - alpha) * smoothed[-1])
     return np.array(smoothed)
 
+def create_features_for_inference(df):
+    """
+    Membuat fitur untuk inference yang konsisten dengan training
+    """
+    df_temp = df.copy()
+    
+    # Technical indicators
+    # MACD
+    ema8 = df_temp['close'].ewm(span=8, adjust=False).mean()
+    ema21 = df_temp['close'].ewm(span=21, adjust=False).mean()
+    df_temp['macd_line'] = ema8 - ema21
+    df_temp['macd_signal'] = df_temp['macd_line'].ewm(span=14, adjust=False).mean()
+    df_temp['macd_histogram'] = df_temp['macd_line'] - df_temp['macd_signal']
+    
+    # RSI
+    delta = df_temp['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / (loss + 1e-10)
+    df_temp['rsi'] = 100 - (100 / (1 + rs))
+    
+    # Bollinger Bands
+    sma20 = df_temp['close'].rolling(window=20).mean()
+    std20 = df_temp['close'].rolling(window=20).std()
+    df_temp['bb_upper'] = sma20 + (std20 * 2)
+    df_temp['bb_lower'] = sma20 - (std20 * 2)
+    df_temp['bb_percent'] = (df_temp['close'] - df_temp['bb_lower']) / (df_temp['bb_upper'] - df_temp['bb_lower'] + 1e-10)
+    
+    # Volume indicators
+    df_temp['volume_ma'] = df_temp['volume'].rolling(window=20).mean()
+    df_temp['volume_ratio'] = df_temp['volume'] / (df_temp['volume_ma'] + 1e-10)
+    
+    # Price momentum
+    df_temp['returns_1'] = df_temp['close'].pct_change(1)
+    df_temp['returns_5'] = df_temp['close'].pct_change(5)
+    df_temp['returns_10'] = df_temp['close'].pct_change(10)
+    
+    # Volatility
+    df_temp['volatility_20'] = df_temp['close'].rolling(window=20).std()
+    
+    # Remove temporary columns
+    df_temp = df_temp.drop(['volume_ma'], axis=1)
+    
+    # Handle missing values
+    df_temp = df_temp.ffill().bfill()
+    
+    return df_temp
+
 def prepare_features_for_prediction(df, look_back=60, scaler=None, model_type=None):
     """
     Menyiapkan fitur untuk prediksi model log-return
-    Args:
-        df (pd.DataFrame): DataFrame dengan kolom OHLCV
-        look_back (int): Jumlah data points untuk window
-        scaler (MinMaxScaler, optional): Scaler yang sudah di-fit
-        model_type (str): Jenis model ('xgb', 'lgbm', 'lstm')
-    Returns:
-        numpy.array: Array fitur yang telah di-scale
+    PERBAIKAN: Gunakan feature engineering yang konsisten dengan training
     """
     try:
         logger.info(f"Menyiapkan fitur prediksi dari {len(df)} titik data")
-        df = df.copy()
         
-        # Validasi kolom
-        required_cols = ['close', 'open', 'high', 'low', 'volume', 'volumeNotional']
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            logger.error(f"Kolom yang diperlukan tidak ada: {missing_cols}")
-            return None
+        # PERBAIKAN: Gunakan fungsi feature engineering yang sama dengan training
+        df = create_features_for_inference(df)
         
-        if len(df) < look_back:
-            logger.error(f"Data tidak cukup: dibutuhkan minimal {look_back}, didapat {len(df)}")
-            return None
-        
-        # Hitung fitur teknikal dengan penanganan pembagian nol
-        open_replaced = df['open'].replace(0, 1e-8)
-        df['volatility_range'] = ((df['high'] - df['low']) / open_replaced) * 100  # Amplifikasi *100 untuk sensitivitas emas rendah var
-        df['price_momentum'] = df['close'].diff().rolling(window=6, min_periods=1).mean().fillna(0) * 100  # Momentum 1 jam (12 × 5 menit)
-        df['price_trend'] = df['close'].pct_change().rolling(window=6, min_periods=1).mean().fillna(0) * 100  # Tren 1 jam (12 × 5 menit)
-        
-        # Gunakan volumeNotional langsung tanpa normalisasi terpisah
-        # df['volumeNotional'] = df['volumeNotional']  # Pertahankan sebagai fitur mentah
-        # Opsional: Normalisasi rolling jika diperlukan (komentar untuk pengujian)
-        df['volumeNotional'] = df['volumeNotional'] / df['volumeNotional'].rolling(window=20, min_periods=1).mean().replace(0, 1e-8)
-        
-        # Hitung SMA dan jarak
-        df['sma_10'] = df['close'].rolling(window=10, min_periods=1).mean()
-        df['dist_sma_10'] = (df['close'] - df['sma_10']) / open_replaced
-        
-        # Hitung SMA cross 8-13
-        df['sma_8'] = df['close'].rolling(window=8, min_periods=1).mean()
-        df['sma_13'] = df['close'].rolling(window=13, min_periods=1).mean()
-        df['sma_cross_8_13'] = df['sma_8'] - df['sma_13']
-        df['sma_cross_signal'] = np.where(df['sma_cross_8_13'] > 0, 1, np.where(df['sma_cross_8_13'] < 0, -1, 0))
-        
-        # Tambahkan log return
-        df['log_return_1h'] = np.log(df['close'] / df['close'].shift(12)).fillna(0)
-        df['log_return_4h'] = np.log(df['close'] / df['close'].shift(48)).fillna(0)
-        
-        # Daftar fitur HARUS sama dengan saat pelatihan
+        # Daftar fitur yang konsisten dengan training
         feature_columns = [
-            'close', 'open', 'high', 'low',
-            'volatility_range',
-            'sma_10', 'dist_sma_10',
-            'sma_cross_8_13', 'sma_cross_signal',
-            'log_return_1h', 'log_return_4h',
-            'volumeNotional',
-            'price_momentum',
-            'price_trend'
+            'close', 'open', 'high', 'low', 'volume',
+            'macd_line', 'macd_signal', 'macd_histogram',
+            'rsi', 'bb_percent', 'volume_ratio',
+            'returns_1', 'returns_5', 'returns_10',
+            'volatility_20'
         ]
         
         # Pastikan hanya fitur yang ada di DataFrame yang digunakan
@@ -532,12 +522,21 @@ def prepare_features_for_prediction(df, look_back=60, scaler=None, model_type=No
                 df[feature] = 0
             available_features = feature_columns
         
-        # Penanganan nilai tak hingga dan NaN (untuk konsistensi dan robustitas)
+        # Penanganan nilai tak hingga dan NaN
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        df = df.interpolate(method='linear').bfill().ffill()
+        df = df.ffill().bfill()
+        
+        if df.isna().any().any():
+            logger.error(f"Masih terdapat NaN values setelah pembersihan: {df.columns[df.isna().any()].tolist()}")
+            return None
         
         # Ambil jendela fitur
         feature_window = df.iloc[-look_back:][available_features]
+        
+        if len(feature_window) < look_back:
+            logger.error(f"Jendela fitur tidak cukup: {len(feature_window)} < {look_back}")
+            return None
+        
         num_features = len(available_features)
         
         if model_type in ['xgb', 'lgbm']:
@@ -557,23 +556,15 @@ def prepare_features_for_prediction(df, look_back=60, scaler=None, model_type=No
                     flattened_features = flattened_features[:, :expected_features]
             
             if scaler:
-                features = scaler.transform(flattened_features)
+                try:
+                    features = scaler.transform(flattened_features)
+                except Exception as e:
+                    logger.error(f"Error scaling features: {e}")
+                    return None
             else:
                 features = flattened_features
                 
             logger.info(f"Fitur {model_type} shape: {features.shape}")
-            return features
-        
-        elif model_type == 'lstm':
-            # Pertahankan bentuk 3D untuk LSTM
-            if scaler:
-                # Scaling untuk LSTM - scaling per fitur
-                features = scaler.transform(feature_window)
-            else:
-                features = feature_window.values
-                
-            features = features.reshape(1, look_back, num_features)
-            logger.info(f"Fitur LSTM shape: {features.shape}")
             return features
         
         else:
