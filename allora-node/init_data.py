@@ -5,8 +5,8 @@ import pandas as pd
 import json
 import traceback
 from datetime import datetime, timedelta, timezone
-from app_utils import fetch_historical_data
-from app_config import TIINGO_DATA_DIR
+from utils import fetch_historical_data
+from config import TIINGO_DATA_DIR
 import fcntl
 
 # Konfigurasi logging
@@ -24,7 +24,7 @@ def init_price_token(token_name):
     """
     Inisialisasi data harga token dari Tiingo API menggunakan fetch_historical_data
     Args:
-        token_name (str): Nama token (misalnya 'paxgusd')
+        token_name (str): Nama token (misalnya 'btcusd')
     Returns:
         bool: True jika berhasil, False jika gagal
     """
@@ -34,8 +34,8 @@ def init_price_token(token_name):
         # Pastikan direktori cache ada
         os.makedirs(TIINGO_DATA_DIR, exist_ok=True)
         
-        # Path file data
-        json_path = os.path.join(TIINGO_DATA_DIR, "tiingo_data_5min.json")
+        # Path file data per token
+        json_path = os.path.join(TIINGO_DATA_DIR, f"tiingo_data_5min_{token_name.lower()}.json")
         
         # Cek apakah file sudah ada dan cukup baru
         if os.path.exists(json_path):
@@ -46,7 +46,7 @@ def init_price_token(token_name):
                     logger.error(f"Corrupted JSON in {json_path}: {e}. Attempting to re-fetch data.")
                     os.remove(json_path)
                 else:
-                    df_temp = pd.DataFrame(data['paxgusd']['priceData'])
+                    df_temp = pd.DataFrame(data['priceData'])
                     latest_date = pd.to_datetime(df_temp['date']).max() if not df_temp.empty else pd.Timestamp.min
                     current_time = datetime.now(timezone.utc)
                     if not df_temp.empty and (current_time - latest_date).total_seconds() < 24 * 3600:  # Kurang dari 1 hari
@@ -58,8 +58,8 @@ def init_price_token(token_name):
             os.remove(json_path)
             logger.info(f"Removing old cache: {json_path}")
         
-        # Inisialisasi data menggunakan fetch_historical_data dari app_utils
-        df = fetch_historical_data(ticker="paxgusd", resample_freq="5min")
+        # Inisialisasi data menggunakan fetch_historical_data dari utils
+        df = fetch_historical_data(ticker=token_name, resample_freq="5min")
         if df.empty:
             logger.error(f"No data returned from Tiingo for {token_name}")
             return False
@@ -67,7 +67,7 @@ def init_price_token(token_name):
         # Simpan data ke file dengan lock
         with open(json_path, 'w') as f:
             fcntl.flock(f, fcntl.LOCK_EX)  # Kunci file
-            json.dump({'paxgusd': {'priceData': df.to_dict('records')}}, f, indent=4)
+            json.dump({'priceData': df.to_dict('records')}, f, indent=4)
             fcntl.flock(f, fcntl.LOCK_UN)  # Lepas kunci
         logger.info(f"Saved {len(df)} data points to {json_path} for {token_name}, date range: {df['date'].min()} to {df['date'].max()}")
         
@@ -84,7 +84,7 @@ def initialize_tokens():
     Menginisialisasi semua token yang ditentukan di environment variable
     """
     try:
-        tokens = os.environ.get('TOKENS', 'paxgusd').split(',')
+        tokens = os.environ.get('TOKENS', 'btcusd').split(',')
         logger.info(f"Tokens: {tokens}")
         if tokens and len(tokens) > 0:
             for token in tokens:
