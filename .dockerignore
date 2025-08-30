@@ -1,1 +1,12 @@
-
+.git
+.gitignore
+.dockerignore
+README.md
+data/
+source-data/
+worker-data/
+models/
+__pycache__/
+*.pyc
+logs/
+*.log
