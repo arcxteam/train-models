@@ -655,7 +655,7 @@ def train_log_return_models(token_name, look_back=60, prediction_horizon=480, ho
         # Train model XGB
         xgb_metrics = train_and_save_xgb_model(
             token_name, X_train_clean, Y_train_clean, X_test_clean, Y_test_clean, 
-            prev_Y_test_clean, scaler_xgb, prediction_horizon, feature_columns
+            prev_Y_test_clean, scaler_xgb, prediction_horizon
         )
         if xgb_metrics:
             results['xgb'] = xgb_metrics
@@ -663,7 +663,7 @@ def train_log_return_models(token_name, look_back=60, prediction_horizon=480, ho
         # Train model LGBM
         lgbm_metrics = train_and_save_lgbm_model(
             token_name, X_train_clean, Y_train_clean, X_test_clean, Y_test_clean,
-            prev_Y_test_clean, scaler_xgb, prediction_horizon, feature_columns
+            prev_Y_test_clean, scaler_xgb, prediction_horizon
         )
         if lgbm_metrics:
             results['lgbm'] = lgbm_metrics
