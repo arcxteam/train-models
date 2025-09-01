@@ -294,7 +294,7 @@ def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
         cache_dir (str): Direktori cache Tiingo
         
     Returns:
-        tuple: (pd.DataFrame, float) atau (None, None) jika gagal
+        pd.DataFrame: DataFrame dengan data atau None jika gagal
     """
     base_ticker = token_name.lower()
     cache_path = _get_tiingo_cache_path(token_name, "5min")
@@ -302,7 +302,7 @@ def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
     # Cek keberadaan file cache
     if not os.path.exists(cache_path):
         logger.error(f"Cache file not found: {cache_path}")
-        return None, None
+        return None
     
     try:
         # Muat data dari cache
@@ -312,7 +312,7 @@ def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
         # Validasi struktur data
         if 'priceData' not in data:
             logger.error(f"Invalid cache structure: 'priceData' missing in {cache_path}")
-            return None, None
+            return None
         
         df = pd.DataFrame(data['priceData'])
         logger.info(f"Initial data loaded: {len(df)} records")
@@ -320,7 +320,7 @@ def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
         # Jika DataFrame kosong, kembalikan None
         if df.empty:
             logger.warning(f"Cache contains no records for {token_name}")
-            return None, None
+            return None
         
         # Validasi dan isi kolom yang hilang
         required_columns = ['date', 'open', 'high', 'low', 'close', 'volume', 'volumeNotional', 'tradesDone']
@@ -332,7 +332,7 @@ def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
         # Pastikan kolom 'close' tidak semuanya nol atau NaN
         if df['close'].isna().all() or (df['close'] == 0).all():
             logger.error(f"Column 'close' contains only NaN or zeros, cannot process data")
-            return None, None
+            return None
         
         # Konversi 'date' ke datetime dan buat timestamp
         df['date'] = pd.to_datetime(df['date'], errors='coerce')
@@ -342,7 +342,7 @@ def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
         
         if df.empty:
             logger.error("DataFrame empty after date conversion")
-            return None, None
+            return None
         
         df['timestamp'] = df['date'].astype(np.int64) // 10**9
         
@@ -354,21 +354,13 @@ def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
         logger.info(f"After removing duplicates: {len(df)} records")
         
         # Pastikan cukup data untuk prediksi
-        look_back = 60  # Sesuaikan dengan konfigurasi di app.py dan trainmodel.py
+        look_back = 60
         if len(df) < look_back:
             logger.error(f"Insufficient data: need at least {look_back} records, got {len(df)}")
-            return None, None
-        
-        # Ambil harga terakhir, gunakan CoinGecko sebagai fallback jika data kosong
-        coingecko_price = df['close'].iloc[-1] if not df.empty else None
-        if coingecko_price is None or coingecko_price == 0:
-            logger.warning("Last 'close' price is invalid, attempting to fetch from CoinGecko")
-            coingecko_token = token_name.replace('usd', '').lower()  # Misal 'btc' untuk 'btcusd'
-            prices = get_coingecko_prices([coingecko_token])
-            coingecko_price = prices.get(coingecko_token, (None, None))[0] if prices else None
+            return None
         
         logger.info(f"Final loaded data: {len(df)} records for {token_name}, date range: {df['date'].min()} to {df['date'].max()}")
-        return df, coingecko_price
+        return df
     
     except json.JSONDecodeError as e:
         logger.error(f"JSONDecodeError loading Tiingo cache data: {e}")
@@ -378,12 +370,11 @@ def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
                 logger.error(f"Cache content sample: {f.read()[:100]}")
         except Exception as read_err:
             logger.error(f"Failed to read cache content: {read_err}")
-        return None, None
+        return None
     except Exception as e:
         logger.error(f"Error loading Tiingo cache data: {e}")
         logger.error(traceback.format_exc())
-        return None, None
-
+        return None
 
 def calculate_zptae(y_true, y_pred, sigma=None, alpha=0.5, window_size=100):
     """
@@ -399,6 +390,14 @@ def calculate_zptae(y_true, y_pred, sigma=None, alpha=0.5, window_size=100):
     """
     y_true = y_true.flatten()
     y_pred = y_pred.flatten()
+    
+    # Pastikan length sama
+    if len(y_true) != len(y_pred):
+        min_len = min(len(y_true), len(y_pred))
+        y_true = y_true[:min_len]
+        y_pred = y_pred[:min_len]
+        logger.warning(f"y_true and y_pred length mismatch, using first {min_len} elements")
+    
     abs_errors = np.abs(y_true - y_pred)
     abs_errors = np.clip(abs_errors, 0, np.percentile(abs_errors, 99))  # Batasi outlier
     n = len(abs_errors)
@@ -449,30 +448,30 @@ def create_features_for_inference(df):
     """
     df_temp = df.copy()
     
-    # Technical indicators
+    # Technical indicators dengan min_periods=1 untuk handle edge cases
     # MACD
-    ema8 = df_temp['close'].ewm(span=8, adjust=False).mean()
-    ema21 = df_temp['close'].ewm(span=21, adjust=False).mean()
+    ema8 = df_temp['close'].ewm(span=8, adjust=False, min_periods=1).mean()
+    ema21 = df_temp['close'].ewm(span=21, adjust=False, min_periods=1).mean()
     df_temp['macd_line'] = ema8 - ema21
-    df_temp['macd_signal'] = df_temp['macd_line'].ewm(span=14, adjust=False).mean()
+    df_temp['macd_signal'] = df_temp['macd_line'].ewm(span=14, adjust=False, min_periods=1).mean()
     df_temp['macd_histogram'] = df_temp['macd_line'] - df_temp['macd_signal']
     
     # RSI
     delta = df_temp['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
     rs = gain / (loss + 1e-10)
     df_temp['rsi'] = 100 - (100 / (1 + rs))
     
     # Bollinger Bands
-    sma20 = df_temp['close'].rolling(window=20).mean()
-    std20 = df_temp['close'].rolling(window=20).std()
+    sma20 = df_temp['close'].rolling(window=20, min_periods=1).mean()
+    std20 = df_temp['close'].rolling(window=20, min_periods=1).std()
     df_temp['bb_upper'] = sma20 + (std20 * 2)
     df_temp['bb_lower'] = sma20 - (std20 * 2)
     df_temp['bb_percent'] = (df_temp['close'] - df_temp['bb_lower']) / (df_temp['bb_upper'] - df_temp['bb_lower'] + 1e-10)
     
     # Volume indicators
-    df_temp['volume_ma'] = df_temp['volume'].rolling(window=20).mean()
+    df_temp['volume_ma'] = df_temp['volume'].rolling(window=20, min_periods=1).mean()
     df_temp['volume_ratio'] = df_temp['volume'] / (df_temp['volume_ma'] + 1e-10)
     
     # Price momentum
@@ -481,12 +480,25 @@ def create_features_for_inference(df):
     df_temp['returns_10'] = df_temp['close'].pct_change(10)
     
     # Volatility
-    df_temp['volatility_20'] = df_temp['close'].rolling(window=20).std()
+    df_temp['volatility_20'] = df_temp['close'].rolling(window=20, min_periods=1).std()
+    
+    # Handle NaN values dengan nilai netral
+    df_temp['rsi'] = df_temp['rsi'].fillna(50)
+    df_temp['bb_percent'] = df_temp['bb_percent'].fillna(0.5)
+    df_temp['macd_line'] = df_temp['macd_line'].fillna(0)
+    df_temp['macd_signal'] = df_temp['macd_signal'].fillna(0)
+    df_temp['macd_histogram'] = df_temp['macd_histogram'].fillna(0)
+    df_temp['returns_1'] = df_temp['returns_1'].fillna(0)
+    df_temp['returns_5'] = df_temp['returns_5'].fillna(0)
+    df_temp['returns_10'] = df_temp['returns_10'].fillna(0)
+    df_temp['volatility_20'] = df_temp['volatility_20'].fillna(0)
+    df_temp['volume_ratio'] = df_temp['volume_ratio'].fillna(1)
     
     # Remove temporary columns
-    df_temp = df_temp.drop(['volume_ma'], axis=1)
+    if 'volume_ma' in df_temp.columns:
+        df_temp = df_temp.drop(['volume_ma'], axis=1)
     
-    # Handle missing values
+    # Final cleaning
     df_temp = df_temp.ffill().bfill()
     
     return df_temp
@@ -502,7 +514,7 @@ def prepare_features_for_prediction(df, look_back=60, scaler=None, model_type=No
         # PERBAIKAN: Gunakan fungsi feature engineering yang sama dengan training
         df = create_features_for_inference(df)
         
-        # Daftar fitur yang konsisten dengan training
+        # Daftar fitur yang konsisten dengan training - HARUS SAMA PERSIS!
         feature_columns = [
             'close', 'open', 'high', 'low', 'volume',
             'macd_line', 'macd_signal', 'macd_histogram',
@@ -511,16 +523,18 @@ def prepare_features_for_prediction(df, look_back=60, scaler=None, model_type=No
             'volatility_20'
         ]
         
-        # Pastikan hanya fitur yang ada di DataFrame yang digunakan
-        available_features = [col for col in feature_columns if col in df.columns]
-        missing_features = [col for col in feature_columns if col not in df.columns]
-        
-        if missing_features:
-            logger.warning(f"Fitur berikut tidak tersedia: {missing_features}")
-            # Buat fitur yang hilang dengan nilai 0
-            for feature in missing_features:
-                df[feature] = 0
-            available_features = feature_columns
+        # Pastikan semua fitur ada di DataFrame
+        for col in feature_columns:
+            if col not in df.columns:
+                logger.warning(f"Feature {col} not found, creating with default value")
+                if col in ['rsi']:
+                    df[col] = 50  # Neutral value for RSI
+                elif col in ['bb_percent']:
+                    df[col] = 0.5  # Middle of Bollinger Bands
+                elif col in ['volume_ratio']:
+                    df[col] = 1.0  # Normal volume
+                else:
+                    df[col] = 0.0  # Default for other features
         
         # Penanganan nilai tak hingga dan NaN
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -530,41 +544,39 @@ def prepare_features_for_prediction(df, look_back=60, scaler=None, model_type=No
             logger.error(f"Masih terdapat NaN values setelah pembersihan: {df.columns[df.isna().any()].tolist()}")
             return None
         
-        # Ambil jendela fitur
-        feature_window = df.iloc[-look_back:][available_features]
-        
-        if len(feature_window) < look_back:
-            logger.error(f"Jendela fitur tidak cukup: {len(feature_window)} < {look_back}")
+        # Ambil jendela fitur terakhir
+        if len(df) < look_back:
+            logger.error(f"Data tidak cukup untuk look_back: {len(df)} < {look_back}")
             return None
-        
-        num_features = len(available_features)
+            
+        feature_window = df.iloc[-look_back:][feature_columns]
         
         if model_type in ['xgb', 'lgbm']:
-            # FLATTEN fitur untuk tree-based models
+            # FLATTEN fitur untuk tree-based models - HARUS SAMA DENGAN TRAINING!
             flattened_features = feature_window.values.flatten().reshape(1, -1)
             
             # Verifikasi dimensi
-            expected_features = look_back * num_features
+            expected_features = look_back * len(feature_columns)
             if flattened_features.shape[1] != expected_features:
-                logger.warning(f"Dimensi fitur tidak sesuai: {flattened_features.shape[1]} vs {expected_features}")
-                # Tambahkan padding jika diperlukan
-                if flattened_features.shape[1] < expected_features:
-                    padding = np.zeros((1, expected_features - flattened_features.shape[1]))
-                    flattened_features = np.hstack((flattened_features, padding))
-                # Potong jika lebih panjang
-                elif flattened_features.shape[1] > expected_features:
-                    flattened_features = flattened_features[:, :expected_features]
+                logger.error(f"Dimensi fitur tidak sesuai: {flattened_features.shape[1]} vs {expected_features}")
+                return None
             
             if scaler:
                 try:
+                    # Pastikan scaler memiliki jumlah fitur yang sesuai
+                    if hasattr(scaler, 'n_features_in_') and scaler.n_features_in_ != expected_features:
+                        logger.error(f"Scaler expects {scaler.n_features_in_} features, but we have {expected_features}")
+                        return None
+                    
                     features = scaler.transform(flattened_features)
+                    logger.info(f"Features scaled successfully, shape: {features.shape}")
                 except Exception as e:
                     logger.error(f"Error scaling features: {e}")
                     return None
             else:
                 features = flattened_features
+                logger.info(f"Using unscaled features, shape: {features.shape}")
                 
-            logger.info(f"Fitur {model_type} shape: {features.shape}")
             return features
         
         else:
