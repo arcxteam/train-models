@@ -225,13 +225,11 @@ def cached_prediction(token_name, prediction_horizon):
     
     logger.info(f"Memuat model {model_type.upper()} dalam {model_load_time:.3f}s")
     
-    # Gunakan hanya data Tiingo untuk konsistensi
-    data = load_tiingo_data(token_name)
-    if data is None or data[0] is None or len(data[0]) < look_back:
+    # PERBAIKAN: load_tiingo_data sekarang return DataFrame saja
+    df = load_tiingo_data(token_name)
+    if df is None or len(df) < look_back:
         logger.error(f"Data tidak cukup untuk prediksi {token_name}: perlu {look_back}")
         return None
-    
-    df, _ = data
     
     # Gunakan harga Tiingo terakhir untuk konsistensi
     latest_price = float(df['close'].iloc[-1])
@@ -323,17 +321,16 @@ def predict_log_return(token):
     look_back = TOKEN_INFO[token_name]['look_back']
 
     try:
-        # Muat data dari Tiingo
-        data = load_tiingo_data(token_name)
-        if data is None or data[0] is None:
-            logger.error("Gagal memuat data dari Tiingo")
+        # PERBAIKAN: load_tiingo_data sekarang return DataFrame saja, bukan tuple
+        df = load_tiingo_data(token_name)
+        if df is None or len(df) == 0:
+            logger.error("Gagal memuat data dari Tiingo atau data kosong")
             return Response(json.dumps({"error": "Data tidak tersedia"}), status=404, mimetype='application/json')
         
-        df, _ = data
         logger.info(f"Data setelah load_tiingo_data: {len(df)} records")
 
-        if df is None or len(df) < look_back:
-            logger.error(f"Data tidak cukup: perlu {look_back}, dapat {len(df) if df is not None else 0}")
+        if len(df) < look_back:
+            logger.error(f"Data tidak cukup: perlu {look_back}, dapat {len(df)}")
             return Response(json.dumps({"error": "Data tidak cukup"}), status=404, mimetype='application/json')
 
         # Ambil look back baris terakhir untuk inferensi 
@@ -449,13 +446,9 @@ async def performance(token):
                 'verified_predictions': len(verified_predictions)
             }
         
-        # Muat data untuk prediksi terkini
-        data = load_tiingo_data(token_name)
-        if data is None or data[0] is None:
-            return jsonify({"status": "error", "message": "Tidak ada data harga terkini"})
-        df, _ = data
-        
-        if len(df) == 0:
+        # PERBAIKAN: load_tiingo_data sekarang return DataFrame saja
+        df = load_tiingo_data(token_name)
+        if df is None or len(df) == 0:
             return jsonify({"status": "error", "message": "Tidak ada data harga terkini"})
         
         current_price = float(df['close'].iloc[-1])
