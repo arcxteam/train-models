@@ -129,7 +129,8 @@ def get_data_snapshot(token_name):
 
 def calculate_log_returns(prices, period=480):
     """
-    Menghitung log returns dengan handling yang lebih robust
+    Menghitung log returns dengan alignment yang benar
+    Return: array dengan length yang sama seperti prices, NaN untuk period pertama
     """
     if isinstance(prices, np.ndarray):
         if prices.ndim > 1:
@@ -143,20 +144,14 @@ def calculate_log_returns(prices, period=480):
         logger.error(f"Tidak cukup titik data ({len(prices)}) untuk periode ({period})")
         return np.array([])
     
-    # PERBAIKAN: Handle zero/negative prices lebih robust
-    valid_mask = (prices[period:] > 1e-10) & (prices[:-period] > 1e-10)
-    if not np.any(valid_mask):
-        logger.error("Tidak ada harga valid untuk menghitung log returns")
-        return np.array([])
+    # Hitung log returns yang benar
+    log_returns = np.log(prices[period:] / prices[:-period])
     
-    # Hitung hanya untuk harga valid
-    valid_log_returns = np.log(prices[period:][valid_mask] / prices[:-period][valid_mask])
+    # Kembalikan array dengan length yang sama seperti prices, dengan NaN untuk period pertama
+    result = np.full(len(prices), np.nan)
+    result[period:] = log_returns
     
-    # Buat array hasil dengan NaN untuk nilai invalid
-    log_returns = np.full(len(prices) - period, np.nan)
-    log_returns[valid_mask] = valid_log_returns
-    
-    return log_returns
+    return result
 
 def calculate_zptae(y_true, y_pred, sigma=None, alpha=0.5, window_size=100):
     """
@@ -172,6 +167,14 @@ def calculate_zptae(y_true, y_pred, sigma=None, alpha=0.5, window_size=100):
     """
     y_true = y_true.flatten()
     y_pred = y_pred.flatten()
+    
+    # Pastikan length sama
+    if len(y_true) != len(y_pred):
+        min_len = min(len(y_true), len(y_pred))
+        y_true = y_true[:min_len]
+        y_pred = y_pred[:min_len]
+        logger.warning(f"y_true and y_pred length mismatch, using first {min_len} elements")
+    
     abs_errors = np.abs(y_true - y_pred)
     abs_errors = np.clip(abs_errors, 0, np.percentile(abs_errors, 99))  # Batasi outlier
     n = len(abs_errors)
@@ -185,11 +188,10 @@ def calculate_zptae(y_true, y_pred, sigma=None, alpha=0.5, window_size=100):
             zptae_values[i] = np.sign(z_error) * np.tanh(np.power(np.abs(z_error), alpha))
         return np.mean(zptae_values)
     
-    # Hitung standar deviasi bergerak dengan penyesuaian non-overlapping
+    # Hitung standar deviasi bergerak
     for i in range(n):
-        # Ambil last 100 GT non-overlapping (step 480)
-        start = max(0, i - window_size * 480 + 1)
-        window = y_true[start:i+1:480]  # Non-overlapping setiap 24h step
+        start = max(0, i - window_size + 1)
+        window = y_true[start:i+1]  # Ambil jendela data aktual
         if len(window) > 1:
             sigma_i = np.std(window)
         else:
@@ -220,7 +222,7 @@ def smooth_predictions(preds, alpha=0.1):
 def prepare_data_for_log_return(data_df, look_back=60, prediction_horizon=480):
     """
     Menyiapkan data untuk pelatihan model prediksi log-return
-    PERBAIKAN: Hindari data leakage dan perbaiki feature engineering
+    PERBAIKAN: Alignment yang benar antara features dan target
     """
     logger.info(f"Menyiapkan data dengan look_back={look_back}, prediction_horizon={prediction_horizon}")
     
@@ -240,9 +242,12 @@ def prepare_data_for_log_return(data_df, look_back=60, prediction_horizon=480):
         logger.error(f"Data tidak cukup! Hanya {len(df)} records, butuh minimal {min_required}")
         return None, None, None, None
     
-    # Hitung log returns terlebih dahulu (target variable)
+    # Hitung log returns dengan alignment benar
     price_array = df['close'].values
     all_log_returns = calculate_log_returns(price_array, period=prediction_horizon)
+    
+    # Tambahkan log returns ke DataFrame untuk memudahkan alignment
+    df['log_return_target'] = all_log_returns
     
     # PERBAIKAN: Hindari data leakage - split data sebelum feature engineering
     test_size = int(0.2 * len(df))
@@ -257,30 +262,30 @@ def prepare_data_for_log_return(data_df, look_back=60, prediction_horizon=480):
     def create_features(data_frame):
         df_temp = data_frame.copy()
         
-        # Technical indicators
+        # Technical indicators dengan handle NaN
         # MACD
-        ema8 = df_temp['close'].ewm(span=8, adjust=False).mean()
-        ema21 = df_temp['close'].ewm(span=21, adjust=False).mean()
+        ema8 = df_temp['close'].ewm(span=8, adjust=False, min_periods=1).mean()
+        ema21 = df_temp['close'].ewm(span=21, adjust=False, min_periods=1).mean()
         df_temp['macd_line'] = ema8 - ema21
-        df_temp['macd_signal'] = df_temp['macd_line'].ewm(span=14, adjust=False).mean()
+        df_temp['macd_signal'] = df_temp['macd_line'].ewm(span=14, adjust=False, min_periods=1).mean()
         df_temp['macd_histogram'] = df_temp['macd_line'] - df_temp['macd_signal']
         
         # RSI
         delta = df_temp['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
         rs = gain / (loss + 1e-10)
         df_temp['rsi'] = 100 - (100 / (1 + rs))
         
         # Bollinger Bands
-        sma20 = df_temp['close'].rolling(window=20).mean()
-        std20 = df_temp['close'].rolling(window=20).std()
+        sma20 = df_temp['close'].rolling(window=20, min_periods=1).mean()
+        std20 = df_temp['close'].rolling(window=20, min_periods=1).std()
         df_temp['bb_upper'] = sma20 + (std20 * 2)
         df_temp['bb_lower'] = sma20 - (std20 * 2)
         df_temp['bb_percent'] = (df_temp['close'] - df_temp['bb_lower']) / (df_temp['bb_upper'] - df_temp['bb_lower'] + 1e-10)
         
         # Volume indicators
-        df_temp['volume_ma'] = df_temp['volume'].rolling(window=20).mean()
+        df_temp['volume_ma'] = df_temp['volume'].rolling(window=20, min_periods=1).mean()
         df_temp['volume_ratio'] = df_temp['volume'] / (df_temp['volume_ma'] + 1e-10)
         
         # Price momentum
@@ -289,10 +294,21 @@ def prepare_data_for_log_return(data_df, look_back=60, prediction_horizon=480):
         df_temp['returns_10'] = df_temp['close'].pct_change(10)
         
         # Volatility
-        df_temp['volatility_20'] = df_temp['close'].rolling(window=20).std()
+        df_temp['volatility_20'] = df_temp['close'].rolling(window=20, min_periods=1).std()
+        
+        # Handle NaN values
+        df_temp = df_temp.ffill().bfill()
+        
+        # Fill remaining NaN dengan nilai netral
+        df_temp['rsi'] = df_temp['rsi'].fillna(50)
+        df_temp['bb_percent'] = df_temp['bb_percent'].fillna(0.5)
+        df_temp['macd_line'] = df_temp['macd_line'].fillna(0)
+        df_temp['macd_signal'] = df_temp['macd_signal'].fillna(0)
+        df_temp['macd_histogram'] = df_temp['macd_histogram'].fillna(0)
         
         # Remove temporary columns
-        df_temp = df_temp.drop(['volume_ma'], axis=1)
+        if 'volume_ma' in df_temp.columns:
+            df_temp = df_temp.drop(['volume_ma'], axis=1)
         
         return df_temp
     
@@ -309,31 +325,35 @@ def prepare_data_for_log_return(data_df, look_back=60, prediction_horizon=480):
         'volatility_20'
     ]
     
-    # Handle missing values
+    # Handle missing values akhir
     train_df = train_df.ffill().bfill()
     test_df = test_df.ffill().bfill()
     
-    # Prepare sequences
+    # Prepare sequences dengan alignment YANG BENAR
     X_train, Y_train, prev_Y_train = [], [], []
     X_test, Y_test, prev_Y_test = [], [], []
     
-    # Training data
-    for i in range(len(train_df) - look_back - prediction_horizon):
-        if i < len(all_log_returns):
-            window_df = train_df.iloc[i:i + look_back][feature_columns]
-            window_features = window_df.values.flatten()
+    # PERBAIKAN: Training data dengan alignment benar
+    # Untuk setiap titik i, kita menggunakan features [i-look_back:i] untuk memprediksi target pada i
+    for i in range(look_back, len(train_df)):
+        if not np.isnan(train_df['log_return_target'].iloc[i]):
+            # Features: data dari i-look_back sampai i-1
+            window_df = train_df.iloc[i - look_back:i]
+            window_features = window_df[feature_columns].values.flatten()
+            
+            # Target: log return pada waktu i
             X_train.append(window_features)
-            Y_train.append(all_log_returns[i])
+            Y_train.append(train_df['log_return_target'].iloc[i])
             prev_Y_train.append(window_df['close'].iloc[-1])
     
-    # Test data
-    test_start_idx = len(train_df) - look_back
-    for i in range(len(test_df) - look_back):
-        if test_start_idx + i < len(all_log_returns):
-            window_df = test_df.iloc[i:i + look_back][feature_columns]
-            window_features = window_df.values.flatten()
+    # PERBAIKAN: Test data dengan alignment sama
+    for i in range(look_back, len(test_df)):
+        if not np.isnan(test_df['log_return_target'].iloc[i]):
+            window_df = test_df.iloc[i - look_back:i]
+            window_features = window_df[feature_columns].values.flatten()
+            
             X_test.append(window_features)
-            Y_test.append(all_log_returns[test_start_idx + i])
+            Y_test.append(test_df['log_return_target'].iloc[i])
             prev_Y_test.append(window_df['close'].iloc[-1])
     
     X_train = np.array(X_train)
@@ -343,8 +363,28 @@ def prepare_data_for_log_return(data_df, look_back=60, prediction_horizon=480):
     Y_test = np.array(Y_test)
     prev_Y_test = np.array(prev_Y_test)
     
+    # VALIDATION CHECKS - sangat penting!
     logger.info(f"Training data: X={X_train.shape}, Y={Y_train.shape}")
     logger.info(f"Test data: X={X_test.shape}, Y={Y_test.shape}")
+    
+    # Check untuk NaN values
+    if len(X_train) == 0 or len(X_test) == 0:
+        logger.error("Data training atau testing kosong setelah preparation")
+        return None, None, None, None
+    
+    logger.info(f"Y_train NaN count: {np.sum(np.isnan(Y_train))}")
+    logger.info(f"Y_test NaN count: {np.sum(np.isnan(Y_test))}")
+    logger.info(f"Y_train stats: mean={np.nanmean(Y_train):.6f}, std={np.nanstd(Y_train):.6f}")
+    logger.info(f"Y_test stats: mean={np.nanmean(Y_test):.6f}, std={np.nanstd(Y_test):.6f}")
+    
+    # Pastikan tidak semua target NaN
+    if np.all(np.isnan(Y_train)) or len(Y_train) == 0:
+        logger.error("SEMUA TARGET TRAINING NaN ATAU KOSONG!")
+        return None, None, None, None
+        
+    if np.all(np.isnan(Y_test)) or len(Y_test) == 0:
+        logger.error("SEMUA TARGET TESTING NaN ATAU KOSONG!")
+        return None, None, None, None
     
     return (X_train, Y_train, prev_Y_train, 
             X_test, Y_test, prev_Y_test, 
