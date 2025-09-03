@@ -788,4 +788,11 @@ if __name__ == "__main__":
                 logger.info(f"  ZPTAE: {results[best_model]['zptae']:.6f}")
                 logger.info(f"  Akurasi Arah: {results[best_model]['directional_accuracy']:.2f}%")
             else:
-                logger.info(f"  {token_name.upper()} Log-Return ({prediction_horizon}m): Tidak ada model yang
+                logger.info(f"  {token_name.upper()} Log-Return ({prediction_horizon}m): Tidak ada model yang dilatih")
+        
+    except Exception as e:
+        logger.error(f"Error dalam proses pelatihan: {e}")
+        logger.error(traceback.format_exc())
+    finally:
+        logger.info("Proses pelatihan selesai. Exit container.")
+        sys.exit(0)
