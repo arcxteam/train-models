@@ -292,7 +292,7 @@ def prepare_data_for_log_return(data_df, look_back=60, prediction_horizon=480):
     if missing_cols:
         raise ValueError(f"Kolom yang diperlukan tidak ada: {missing_cols}")
     
-    df = data_frame.copy()
+    df = data_df.copy()
     
     # Hitung log returns dengan alignment benar
     price_array = df['close'].values
