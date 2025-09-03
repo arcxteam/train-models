@@ -3,28 +3,28 @@ import requests
 import json
 import numpy as np
 import pandas as pd
-import sqlite3
 import time
 import traceback
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from sklearn.preprocessing import MinMaxScaler
+from scipy import stats
 from datetime import datetime, timedelta
-from zipfile import ZipFile
 
-# Import dari app_config
-from app_config import (
-    DATABASE_PATH, BLOCK_TIME_SECONDS, DATA_BASE_PATH, 
-    ALLORA_VALIDATOR_API_URL, URL_QUERY_LATEST_BLOCK,
-    TIINGO_API_TOKEN, TIINGO_CACHE_DIR, TIINGO_CACHE_TTL, OKX_CACHE_DIR
-)
+# Import dari config
+try:
+    from config import DATA_BASE_PATH, TIINGO_API_TOKEN, TIINGO_CACHE_TTL
+except ImportError:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    DATA_BASE_PATH = os.path.join(BASE_DIR, 'data')
+    TIINGO_API_TOKEN = os.environ.get('TIINGO_API_TOKEN', '')
+    TIINGO_CACHE_TTL = 150
 
-# Inisialisasi logger
+# Direktori dan konfigurasi
+TIINGO_DATA_DIR = os.path.join(DATA_BASE_PATH, 'tiingo_data')
+os.makedirs(TIINGO_DATA_DIR, exist_ok=True)
 logger = logging.getLogger(__name__)
 
-# Cek dan buat direktori cache jika belum ada
-os.makedirs(TIINGO_CACHE_DIR, exist_ok=True)
-os.makedirs(OKX_CACHE_DIR, exist_ok=True)
+HEADERS = {'Content-Type': 'application/json'}
 
 # Variabel untuk mencatat waktu permintaan API dan rate limiting
 _last_tiingo_request_time = 0
@@ -33,327 +33,42 @@ _tiingo_request_count_daily = 0
 _tiingo_hourly_reset = time.time()
 _tiingo_daily_reset = time.time()
 
-# Inisialisasi OKX client
-okx_client = None
-try:
-    import ccxt
-    okx_client = ccxt.okx()
-    logger.info("OKX client initialized successfully")
-except ImportError:
-    logger.warning("ccxt library not available, OKX data source will be disabled")
-except Exception as e:
-    logger.error(f"Failed to initialize OKX client: {e}")
-
-# Function to check and create the table if not exists
-def check_create_table():
-    """
-    Memeriksa dan membuat tabel prices dengan data OHLCV lengkap jika belum ada
-    """
-    try:
-        with sqlite3.connect(DATABASE_PATH) as conn:
-            cursor = conn.cursor()
-            
-            # Cek apakah tabel prices sudah ada
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='prices'")
-            table_exists = cursor.fetchone() is not None
-            
-            if table_exists:
-                # Cek apakah perlu migrasi dari format lama
-                cursor.execute("PRAGMA table_info(prices)")
-                columns = [col[1] for col in cursor.fetchall()]
-                
-                # Jika tabel lama hanya memiliki struktur awal
-                if set(columns) == set(['block_height', 'token', 'price']):
-                    logger.info("Detected old table format, migrating to OHLCV format...")
-                    
-                    # Cadangkan data lama
-                    cursor.execute("CREATE TABLE prices_backup AS SELECT * FROM prices")
-                    logger.info("Backed up old data to prices_backup")
-                    
-                    # Drop tabel lama
-                    cursor.execute("DROP TABLE prices")
-                    
-                    # Buat tabel baru dengan struktur OHLCV
-                    cursor.execute('''
-                        CREATE TABLE prices (
-                            block_height INTEGER,
-                            token TEXT,
-                            price REAL,
-                            open REAL,
-                            high REAL,
-                            low REAL,
-                            volume REAL,
-                            timestamp INTEGER,
-                            PRIMARY KEY (block_height, token)
-                        )
-                    ''')
-                    
-                    # Masukkan data lama, dengan nilai OHLCV dummy
-                    cursor.execute('''
-                        INSERT INTO prices (block_height, token, price, open, high, low, volume, timestamp)
-                        SELECT block_height, token, price, price, price, price, 0, 
-                               (strftime('%s','now') - ((block_height % 10000) * 300)) 
-                        FROM prices_backup
-                    ''')
-                    
-                    logger.info("Migration completed: Table upgraded to OHLCV format")
-                    conn.commit()
-            else:
-                # Buat tabel baru jika belum ada
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS prices (
-                        block_height INTEGER,
-                        token TEXT,
-                        price REAL,
-                        open REAL,
-                        high REAL,
-                        low REAL,
-                        volume REAL,
-                        timestamp INTEGER,
-                        PRIMARY KEY (block_height, token)
-                    )
-                ''')
-                logger.info("Created new prices table with OHLCV structure")
-                conn.commit()
-                
-    except sqlite3.Error as e:
-        logger.error(f"An error occurred while creating/updating the table: {str(e)}")
-
-def download_binance_data(symbol, interval, year, month, download_path):
-    """
-    Download data Binance untuk simbol dan interval tertentu
-    
-    Args:
-        symbol (str): Simbol trading Binance
-        interval (str): Interval waktu ('1m', '1h', etc.)
-        year (int): Tahun data
-        month (int): Bulan data
-        download_path (str): Path untuk menyimpan file yang didownload
-    """
-    base_url = f"https://data.binance.vision/data/futures/um/daily/klines"
-    with ThreadPoolExecutor() as executor:
-        for day in range(1, 32):  # Asumsi hari 1-31
-            url = f"{base_url}/{symbol}/{interval}/{symbol}-{interval}-{year}-{month:02d}-{day:02d}.zip"
-            executor.submit(download_url, url, download_path)
-
-def download_url(url, download_path):
-    """
-    Download file dari URL ke path tertentu
-    
-    Args:
-        url (str): URL file yang akan didownload
-        download_path (str): Path tujuan
-    """
-    target_file_path = os.path.join(download_path, os.path.basename(url)) 
-    if os.path.exists(target_file_path):
-        logger.info(f"File already exists: {url}")
-        return
-    
-    response = requests.get(url)
-    if response.status_code == 404:
-        logger.info(f"File does not exist: {url}")
-    else:
-        os.makedirs(os.path.dirname(target_file_path), exist_ok=True)
-        with open(target_file_path, "wb") as f:
-            f.write(response.content)
-        logger.info(f"Downloaded: {url} to {target_file_path}")
-
-def extract_and_process_binance_data(token_name, download_path, start_date_epoch, end_date_epoch, latest_block_height):
-    """
-    Ekstrak dan proses data Binance ke database
-    
-    Args:
-        token_name (str): Nama token
-        download_path (str): Path file yang didownload
-        start_date_epoch (int): Timestamp untuk batas awal data
-        end_date_epoch (int): Timestamp untuk batas akhir data
-        latest_block_height (int): Block height terbaru
-    """
-    files = sorted([x for x in os.listdir(download_path) if x.endswith('.zip')])
-
-    if len(files) == 0:
-        logger.warning(f"No data files found for {token_name}")
-        return
-
-    with sqlite3.connect(DATABASE_PATH) as conn:
-        cursor = conn.cursor()
-
-        for file in files:
-            zip_file_path = os.path.join(download_path, file)
-
-            try:
-                with ZipFile(zip_file_path) as myzip:
-                    with myzip.open(myzip.filelist[0]) as f:
-                        df = pd.read_csv(f, header=None)
-                        df.columns = [
-                            "open_time", "open", "high", "low", "close",
-                            "volume", "close_time", "quote_volume", 
-                            "count", "taker_buy_volume", "taker_buy_quote_volume", "ignore"
-                        ]
-                        
-                        df['close_time'] = pd.to_numeric(df['close_time'], errors='coerce')
-                        df.dropna(subset=['close_time'], inplace=True)
-                        df['close_time'] = pd.to_datetime(df['close_time'], unit='ms')
-
-                        for _, row in df.iterrows():
-                            price_timestamp = row['close_time'].timestamp()
-                            if price_timestamp < start_date_epoch or price_timestamp > end_date_epoch:
-                                continue
-
-                            blocks_diff = (end_date_epoch - price_timestamp) / BLOCK_TIME_SECONDS
-                            block_height = int(latest_block_height - blocks_diff)
-
-                            if block_height < 1:
-                                continue
-
-                            price = row['close']
-                            cursor.execute("INSERT OR REPLACE INTO prices (block_height, token, price) VALUES (?, ?, ?)", 
-                                           (block_height, token_name.lower(), price))
-                            logger.info(f"{token_name} - {price_timestamp} - Inserted data point - block {block_height} : {price}")
-
-            except Exception as e:
-                logger.error(f"Error reading {zip_file_path}: {str(e)}")
-                continue
-
-        conn.commit()
-
-def get_latest_network_block():
-    """
-    Mendapatkan block height terbaru dari network
-    
-    Returns:
-        dict: Data block dengan block height
-    """
-    try:
-        url = f"{ALLORA_VALIDATOR_API_URL}{URL_QUERY_LATEST_BLOCK}"
-        logger.info(f"Latest network block URL: {url}")
-        response = requests.get(url)
-        response.raise_for_status()
-
-         # Handle case where the response might be a list or dictionary
-        if isinstance(response.json(), list):
-            block_data = response.json()[0]  # Assume it's a list, get the first element
-        else:
-            block_data = response.json()  # Assume it's already a dictionary
-
-        try:
-            latest_block_height = int(block_data['block']['header']['height'])
-            logger.info(f"Latest block height: {latest_block_height}")
-        except KeyError:
-            logger.error("Error: Missing expected keys in block data.")
-            latest_block_height = 0
-
-        return {'block': {'header': {'height': latest_block_height}}}
-    except Exception as e:
-        logger.error(f'Failed to get block height: {str(e)}')
-        return {}
-
-def init_price_token(symbol, token_name, token_to):
-    """
-    Inisialisasi data harga token dari Binance
-    
-    Args:
-        symbol (str): Simbol trading (seperti 'BERA')
-        token_name (str): Nama token (seperti 'berausd')
-        token_to (str): Pasangan quote currency (seperti 'USD')
-    """
-    try:
-        check_create_table()
-
-        with sqlite3.connect(DATABASE_PATH) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM prices WHERE token=?", (token_name.lower(),))
-            count = cursor.fetchone()[0]
-
-        if count > 15000:
-            logger.info(f'Data already exists for {token_name} token, {count} entries')
-            return
-        
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=31)
-
-        block_data = get_latest_network_block()
-        latest_block_height = int(block_data['block']['header']['height'])
-
-        start_date_epoch = int(start_date.timestamp())
-        end_date_epoch = int(end_date.timestamp())
-
-        symbol = f"{symbol.upper()}{token_to.upper()}T"
-        interval = "1m"  # 1-minute interval data
-        binance_data_path = os.path.join(DATA_BASE_PATH, "binance/futures-klines")
-        download_path = os.path.join(binance_data_path, symbol.lower())
-        download_binance_data(symbol, interval, end_date.year, end_date.month, download_path)
-        extract_and_process_binance_data(token_name, download_path, start_date_epoch, end_date_epoch, latest_block_height)
-
-        logger.info(f'Data initialized successfully for {token_name} token')
-    except Exception as e:
-        logger.error(f'Failed to initialize data for {token_name} token: {str(e)}')
-        raise e
-
 def _check_tiingo_rate_limits():
-    """
-    Memeriksa batas rate Tiingo API dan melakukan reset jika perlu
-    
-    Returns:
-        bool: True jika permintaan masih di bawah batas, False jika batas tercapai
-    """
     global _tiingo_request_count_hourly, _tiingo_request_count_daily
     global _tiingo_hourly_reset, _tiingo_daily_reset
     
     current_time = time.time()
     
-    # Reset penghitung jam setiap jam
-    if current_time - _tiingo_hourly_reset > 3600:  # 1 jam dalam detik
+    if current_time - _tiingo_hourly_reset > 3600:
         _tiingo_request_count_hourly = 0
         _tiingo_hourly_reset = current_time
         logger.info("Tiingo hourly request counter reset")
     
-    # Reset penghitung harian setiap 24 jam
-    if current_time - _tiingo_daily_reset > 86400:  # 24 jam dalam detik
+    if current_time - _tiingo_daily_reset > 86400:
         _tiingo_request_count_daily = 0
         _tiingo_daily_reset = current_time
         logger.info("Tiingo daily request counter reset")
     
-    # Periksa batas
-    if _tiingo_request_count_hourly >= 45:  # Tetapkan batas 45 (dari 50) untuk jaga-jaga
-        logger.warning("Approaching Tiingo hourly request limit (45/50). Using cached data.")
+    if _tiingo_request_count_hourly >= 50:
+        logger.warning("Tiingo hourly request limit (50) reached for 5-minute interval. Using cached data.")
         return False
     
-    if _tiingo_request_count_daily >= 900:  # Tetapkan batas 900 (dari 1000) untuk jaga-jaga
-        logger.warning("Approaching Tiingo daily request limit (900/1000). Using cached data.")
+    if _tiingo_request_count_daily >= 1000:
+        logger.warning("Approaching Tiingo daily request limit (1000). Using cached data.")
         return False
     
     return True
 
 def _increment_tiingo_counters():
-    """Menambah penghitung permintaan Tiingo"""
     global _tiingo_request_count_hourly, _tiingo_request_count_daily
     _tiingo_request_count_hourly += 1
     _tiingo_request_count_daily += 1
 
 def _get_tiingo_cache_path(ticker, resample_freq):
-    """
-    Mendapatkan path cache untuk data Tiingo
-    
-    Args:
-        ticker (str): Ticker simbol
-        resample_freq (str): Frekuensi data
-        
-    Returns:
-        str: Path file cache
-    """
-    return os.path.join(TIINGO_CACHE_DIR, f"{ticker}_{resample_freq}_cache.json")
+    base_ticker = ticker.lower()
+    return os.path.join(TIINGO_DATA_DIR, f"tiingo_data_{resample_freq}_{base_ticker}.json")
 
 def _is_cache_valid(cache_path):
-    """
-    Memeriksa apakah file cache masih valid berdasarkan TTL
-    
-    Args:
-        cache_path (str): Path file cache
-        
-    Returns:
-        bool: True jika cache valid, False jika tidak
-    """
     if not os.path.exists(cache_path):
         return False
     
@@ -362,525 +77,514 @@ def _is_cache_valid(cache_path):
     
     return (current_time - file_mtime) < TIINGO_CACHE_TTL
 
-def get_ohlcv_from_tiingo(ticker, resample_freq='1min', days_back=1):
+def get_tiingo_data(ticker, interval="5min", start_date=None, end_date=None):
     """
-    Mengambil data OHLCV dari Tiingo API untuk kripto
-    
+    Mengambil data OHLCV dari Tiingo API untuk kripto dengan rentang tanggal tertentu
     Args:
-        ticker (str): Simbol ticker (misalnya 'berausd')
-        resample_freq (str): Frekuensi data ('1min', '5min', '1hour', etc.)
-        days_back (int): Jumlah hari mundur untuk data
-        
+        ticker (str): Simbol ticker (misalnya 'btcusd')
+        interval (str): Frekuensi data ('5min' default)
+        start_date (str): Tanggal mulai (format 'YYYY-MM-DDTHH:MM:SSZ')
+        end_date (str): Tanggal akhir (format 'YYYY-MM-DDTHH:MM:SSZ')
     Returns:
-        pandas.DataFrame: Data OHLCV atau None jika gagal
+        pd.DataFrame: DataFrame dengan data OHLCV atau DataFrame kosong jika gagal
     """
     try:
-        # Pastikan kita menggunakan format ticker yang benar untuk Tiingo
-        base_ticker = ticker.lower()
-        # Hapus 'usd' jika ada, terlepas dari huruf besar/kecil
-        if 'usd' in base_ticker:
-            base_ticker = base_ticker.replace('usd', '')
-        ticker_formatted = f"{base_ticker}usd"  # Format yang diharapkan Tiingo
-        
+        ticker_formatted = ticker.lower() if ticker.lower().endswith('usd') else f"{ticker.lower()}usd"
         logger.info(f"Formatting ticker from {ticker} to {ticker_formatted} for Tiingo API")
         
-        # Cek file cache
-        cache_path = _get_tiingo_cache_path(ticker_formatted, resample_freq)
-        
-        # Jika cache valid dan batas rate hampir tercapai, gunakan cache
-        if _is_cache_valid(cache_path) and not _check_tiingo_rate_limits():
-            try:
-                logger.info(f"Using cached Tiingo data from {cache_path}")
-                with open(cache_path, 'r') as f:
-                    cached_data = json.load(f)
-                
-                # Konversi cache ke DataFrame
-                df = pd.DataFrame(cached_data)
-                return df
-            except Exception as e:
-                logger.error(f"Error reading Tiingo cache: {e}")
-                # Lanjutkan dengan permintaan API jika cache gagal
-        
-        # Cek rate limit
         if not _check_tiingo_rate_limits():
-            logger.warning("Tiingo rate limit approached. Skipping request.")
-            return None
+            logger.warning("Tiingo rate limit reached. Skipping request.")
+            return pd.DataFrame()
         
-        # Hitung tanggal mulai (days_back hari yang lalu)
-        start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+        url = f"https://api.tiingo.com/tiingo/crypto/prices?tickers={ticker_formatted}&resampleFreq={interval}&token={TIINGO_API_TOKEN}"
+        if start_date and end_date:
+            url += f"&startDate={start_date}&endDate={end_date}"
         
-        # Siapkan URL dan headers
-        url = f"https://api.tiingo.com/tiingo/crypto/prices"
-        params = {
-            'tickers': ticker_formatted,
-            'startDate': start_date,
-            'resampleFreq': resample_freq,
-            'token': TIINGO_API_TOKEN
-        }
-        headers = {
-            'Content-Type': 'application/json'
-        }
+        logger.info(f"Fetching data from Tiingo for {ticker_formatted} with {interval} interval from {start_date} to {end_date}")
         
-        logger.info(f"Fetching data from Tiingo for {ticker_formatted} with {resample_freq} interval")
-        
-        # Buat request ke Tiingo API
         global _last_tiingo_request_time
-        
-        # Menambahkan delay antara permintaan untuk menghindari rate limiting
         current_time = time.time()
-        if current_time - _last_tiingo_request_time < 3.0:  # 3 detik delay
-            time.sleep(3.0 - (current_time - _last_tiingo_request_time))
+        min_interval = 100.0
+        if current_time - _last_tiingo_request_time < min_interval:
+            sleep_time = min_interval - (current_time - _last_tiingo_request_time)
+            logger.info(f"Waiting {sleep_time:.2f} seconds to respect rate limit")
+            time.sleep(sleep_time)
         
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=HEADERS)
         _last_tiingo_request_time = time.time()
         _increment_tiingo_counters()
         
-        # Log response untuk debugging
         logger.info(f"Tiingo API response status: {response.status_code}")
         if response.status_code != 200:
             logger.warning(f"Tiingo API error: {response.text}")
+            error_json_path = os.path.join(TIINGO_DATA_DIR, f'tiingo_error_{ticker_formatted}_{start_date[:10]}.json')
+            with open(error_json_path, 'w') as f:
+                json.dump(response.json(), f, indent=4)
+            logger.error(f"Error details saved to {error_json_path}")
+            return pd.DataFrame()
         
-        response.raise_for_status()  # Raise exception jika terjadi error
+        response.raise_for_status()
         
-        # Parse respons JSON
         data = response.json()
+        if not data or not any('priceData' in item for item in data):
+            logger.error(f"No data returned from Tiingo for {ticker_formatted} from {start_date} to {end_date}")
+            return pd.DataFrame()
         
-        if not data or len(data) == 0:
-            logger.warning(f"Empty response from Tiingo API for {ticker_formatted}")
-            return None
-            
-        if 'priceData' not in data[0] or len(data[0]['priceData']) == 0:
-            logger.warning(f"No price data in Tiingo response for {ticker_formatted}")
-            return None
+        with open(_get_tiingo_cache_path(ticker, interval), 'w') as f:
+            json.dump(data[0] if isinstance(data, list) else data, f, indent=4)
+        logger.info(f"Saved data to {_get_tiingo_cache_path(ticker, interval)}")
         
-        # Extract data OHLCV
-        price_data = data[0]['priceData']
-        
-        # Simpan ke cache
-        try:
-            with open(cache_path, 'w') as f:
-                json.dump(price_data, f)
-            logger.info(f"Cached Tiingo data to {cache_path}")
-        except Exception as e:
-            logger.error(f"Error caching Tiingo data: {e}")
-        
-        # Konversi ke DataFrame
-        df = pd.DataFrame(price_data)
-        
-        # Standarisasi kolom untuk sesuai dengan format yang diperlukan model
-        df['price'] = df['close']  # Tambahkan kolom price yang sama dengan close
-        df['timestamp'] = pd.to_datetime(df['date']).astype(int) / 10**9  # Konversi ke UNIX timestamp dalam detik
-        
-        logger.info(f"Successfully fetched {len(df)} records from Tiingo")
+        df = pd.DataFrame(data[0]['priceData'] if isinstance(data, list) else data[ticker_formatted]['priceData'])
+        df['date'] = pd.to_datetime(df['date'])
+        df['timestamp'] = df['date'].astype(np.int64) // 10**9
+        logger.info(f"Fetched {len(df)} records from Tiingo for {ticker_formatted} from {start_date} to {end_date}")
         return df
     
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         logger.error(f"Error fetching data from Tiingo: {e}")
-        logger.error(traceback.format_exc())
-        return None
+        return pd.DataFrame()
+    except IOError as e:
+        logger.error(f"IO Error saving data for {ticker_formatted}: {e}")
+        return pd.DataFrame()
 
-def get_ohlcv_from_okx(symbol, timeframe='1m', limit=100):
-    """
-    Mengambil data OHLCV terbaru dari OKX API
+def fetch_historical_data(ticker, resample_freq="5min"):
+    end_date = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    start_date = '2025-07-01T00:00:00Z'
+    json_path = _get_tiingo_cache_path(ticker, resample_freq)
+
+    all_data = {'priceData': []}
+    current_end_date = datetime.strptime(end_date, '%Y-%m-%dT%H:%M:%SZ')
+    current_start_date = datetime.strptime(start_date, '%Y-%m-%dT%H:%M:%SZ')
+
+    batch_days = 17 # Maximal 17 hari untuk 1x request timeframe 5mins
+    while current_start_date < current_end_date:
+        batch_end_date = min(current_start_date + timedelta(days=batch_days), current_end_date)
+        batch_start_date = current_start_date.strftime('%Y-%m-%dT%H:%M:%SZ')
+        batch_end_date_str = batch_end_date.strftime('%Y-%m-%dT%H:%M:%SZ')
+        
+        df = get_tiingo_data(ticker, interval=resample_freq, start_date=batch_start_date, end_date=batch_end_date_str)
+        
+        if not df.empty:
+            # Pastikan date dalam format string ISO 8601
+            df['date'] = df['date'].dt.strftime('%Y-%m-%dT%H:%M:%S+00:00')
+            existing_dates = {pd.to_datetime(d['date']).date() for d in all_data['priceData']}
+            new_data = df.to_dict('records')
+            new_data = [d for d in new_data if pd.to_datetime(d['date']).date() not in existing_dates]
+            if new_data:
+                all_data['priceData'].extend(new_data)
+                actual_start = min(pd.to_datetime(d['date']) for d in new_data).strftime('%Y-%m-%d')
+                actual_end = max(pd.to_datetime(d['date']) for d in new_data).strftime('%Y-%m-%d')
+                logger.info(f"Fetched {len(new_data)} new records from {actual_start} to {actual_end}")
+            else:
+                logger.warning(f"No new data after deduplication for batch {batch_start_date} to {batch_end_date_str}")
+        else:
+            logger.warning(f"Failed to fetch data for batch {batch_start_date} to {batch_end_date_str}")
+        
+        current_start_date += timedelta(days=batch_days)
     
+    if all_data['priceData']:
+        with open(json_path, 'w') as f:
+            json.dump(all_data, f, indent=4)
+        logger.info(f"Data saved to {json_path} with {len(all_data['priceData'])} records")
+        df_final = pd.DataFrame(all_data['priceData'])
+        actual_start_date = df_final['date'].min()
+        actual_end_date = df_final['date'].max()
+        logger.info(f"Final data range: {actual_start_date} to {actual_end_date}")
+        return df_final
+    else:
+        logger.error(f"No data collected for historical data")
+        return pd.DataFrame()
+
+def update_recent_data(ticker, resample_freq="5min", initial=False):
+    """
+    Mengupdate data terbaru dari Tiingo API
     Args:
-        symbol (str): Simbol trading, mis. 'BERA/USDT'
-        timeframe (str): Interval waktu ('1m', '5m', '15m', '1h', etc.)
-        limit (int): Jumlah data yang diambil
+        ticker (str): Simbol ticker (misalnya 'btcusd')
+        resample_freq (str): Frekuensi data ('5min' default)
+        initial (bool): Jika True, ambil data 100 jam terakhir
+    Returns:
+        pd.DataFrame: Data OHLCV terbaru
+    """
+    end_date = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    if initial:
+        start_date = (datetime.utcnow() - timedelta(hours=100)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    else:
+        start_date = (datetime.utcnow() - timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    url = f"https://api.tiingo.com/tiingo/crypto/prices?tickers={ticker}&startDate={start_date}&endDate={end_date}&resampleFreq={resample_freq}&token={TIINGO_API_TOKEN}"
+    try:
+        request_response = requests.get(url, headers=HEADERS)
+        logger.info(f"Status Code: {request_response.status_code} for {start_date} to {end_date}")
+        
+        if request_response.status_code == 200:
+            data = request_response.json()
+            if not data or 'priceData' not in data[0]:
+                logger.warning(f"No valid priceData in response: {data}")
+                return pd.DataFrame()
+            
+            all_price_data = []
+            for item in data:
+                if 'priceData' in item:
+                    all_price_data.extend(item['priceData'])
+            if all_price_data:
+                df = pd.DataFrame(all_price_data)
+                df = df.sort_values('date', ascending=False).drop_duplicates(subset=['date'], keep='last')
+                # Tidak perlu konversi ke Timestamp, biarkan sebagai string
+                json_path = _get_tiingo_cache_path(ticker, resample_freq)
+                with open(json_path, 'r') as f:
+                    existing_data = json.load(f)
+                existing_data['priceData'].extend(df.to_dict('records'))
+                with open(json_path, 'w') as f:
+                    json.dump(existing_data, f, indent=4)
+                actual_start_date = df['date'].min()
+                actual_end_date = df['date'].max()
+                logger.info(f"Updated {len(df)} records from {actual_start_date} to {actual_end_date}")
+                return df
+            else:
+                logger.warning(f"No priceData in response for {start_date} to {end_date}")
+                return pd.DataFrame()
+        else:
+            logger.error(f"Error Response: Status {request_response.status_code} for {start_date} to {end_date}")
+            return pd.DataFrame()
+    except Exception as e:
+        logger.error(f"Request failed for {start_date} to {end_date}: {e}")
+        return pd.DataFrame()
+
+def get_coingecko_prices(tokens=['bitcoin']):
+    """
+    Mendapatkan harga terkini dari CoinGecko API untuk multiple tokens sebagai realtime price.
+    
+    Returns:
+        dict: {token: (price, timestamp)} atau {} jika gagal
+    """
+    try:
+        symbols = ','.join(tokens)
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbols}&vs_currencies=usd&include_last_updated_at=true&precision=3"
+        headers = {
+            "accept": "application/json",
+            "x-cg-demo-api-key": "CG-cTraNZPUEmnQV5bD8yuQ3Nbs"
+        }
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        
+        data = response.json()
+        prices = {}
+        for token in tokens:
+            if token in data:
+                price = data[token]['usd']
+                timestamp = data[token]['last_updated_at']
+                timestamp_iso = datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+                prices[token] = (price, timestamp_iso)
+                logger.info(f"CoinGecko real-time price for {token}: ${price} at timestamp {timestamp_iso}")  # Hanya untuk log info
+            else:
+                logger.warning(f"No data for {token} from CoinGecko")
+        
+        return prices
+    
+    except Exception as e:
+        logger.error(f"Error fetching prices from CoinGecko: {e}")
+        logger.error(traceback.format_exc())
+        return {}
+
+def load_tiingo_data(token_name, cache_dir=TIINGO_DATA_DIR):
+    """
+    Memuat data OHLCV dari file cache Tiingo JSON dengan logging detail
+    Args:
+        token_name (str): Nama token (misalnya 'btcusd')
+        cache_dir (str): Direktori cache Tiingo
         
     Returns:
-        pandas.DataFrame: Data OHLCV atau None jika gagal
+        pd.DataFrame: DataFrame dengan data atau None jika gagal
     """
-    if okx_client is None:
-        logger.error("OKX client not initialized")
+    base_ticker = token_name.lower()
+    cache_path = _get_tiingo_cache_path(token_name, "5min")
+    
+    # Cek keberadaan file cache
+    if not os.path.exists(cache_path):
+        logger.error(f"Cache file not found: {cache_path}")
         return None
     
     try:
-        # Cek cache OKX
-        cache_filename = f"{symbol.replace('/', '_')}_{timeframe}_{datetime.now().strftime('%Y%m%d')}.csv"
-        cache_path = os.path.join(OKX_CACHE_DIR, cache_filename)
+        # Muat data dari cache
+        with open(cache_path, 'r') as f:
+            data = json.load(f)
         
-        # Periksa apakah cache masih valid (kurang dari 5 menit)
-        if os.path.exists(cache_path):
-            file_mtime = os.path.getmtime(cache_path)
-            if time.time() - file_mtime < 300:  # 5 menit dalam detik
-                try:
-                    logger.info(f"Using cached OKX data from {cache_path}")
-                    df = pd.read_csv(cache_path)
-                    return df
-                except Exception as e:
-                    logger.error(f"Error reading OKX cache: {e}")
-                    # Lanjutkan dengan permintaan API jika cache gagal
-        
-        # Ambil data OHLCV dari OKX
-        logger.info(f"Fetching {limit} {timeframe} OHLCV data for {symbol} from OKX")
-        ohlcv = okx_client.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        
-        if not ohlcv or len(ohlcv) == 0:
-            logger.warning(f"No OHLCV data returned for {symbol}")
+        # Validasi struktur data
+        if 'priceData' not in data:
+            logger.error(f"Invalid cache structure: 'priceData' missing in {cache_path}")
             return None
         
-        # Konversi ke DataFrame
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df = pd.DataFrame(data['priceData'])
+        logger.info(f"Initial data loaded: {len(df)} records")
         
-        # Konversi timestamp dan tambahkan kolom yang sesuai dengan format data training
-        df['timestamp'] = df['timestamp'] / 1000  # Konversi dari ms ke detik
-        df['price'] = df['close']  # Nama kolom yang sama dengan data training
+        # Jika DataFrame kosong, kembalikan None
+        if df.empty:
+            logger.warning(f"Cache contains no records for {token_name}")
+            return None
         
-        # Simpan ke cache
-        try:
-            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            df.to_csv(cache_path, index=False)
-            logger.info(f"Cached OKX data to {cache_path}")
-        except Exception as e:
-            logger.error(f"Error caching OKX data: {e}")
+        # Validasi dan isi kolom yang hilang
+        required_columns = ['date', 'open', 'high', 'low', 'close', 'volume', 'volumeNotional', 'tradesDone']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        for col in missing_columns:
+            logger.warning(f"Column {col} missing in cache, filling with 0.0")
+            df[col] = 0.0
         
-        logger.info(f"Successfully fetched {len(df)} OHLCV records for {symbol}")
+        # Pastikan kolom 'close' tidak semuanya nol atau NaN
+        if df['close'].isna().all() or (df['close'] == 0).all():
+            logger.error(f"Column 'close' contains only NaN or zeros, cannot process data")
+            return None
+        
+        # Konversi 'date' ke datetime dan buat timestamp
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        if df['date'].isna().any():
+            logger.warning(f"Found {df['date'].isna().sum()} invalid dates, dropping those rows")
+            df = df.dropna(subset=['date'])
+        
+        if df.empty:
+            logger.error("DataFrame empty after date conversion")
+            return None
+        
+        df['timestamp'] = df['date'].astype(np.int64) // 10**9
+        
+        # Hapus duplikat berdasarkan 'date' dengan logging
+        duplicate_count = df.duplicated(subset=['date']).sum()
+        if duplicate_count > 0:
+            logger.info(f"Found {duplicate_count} duplicate dates, keeping the last occurrence")
+        df = df.drop_duplicates(subset=['date'], keep='last').sort_values('date').reset_index(drop=True)
+        logger.info(f"After removing duplicates: {len(df)} records")
+        
+        # Pastikan cukup data untuk prediksi
+        look_back = 60
+        if len(df) < look_back:
+            logger.error(f"Insufficient data: need at least {look_back} records, got {len(df)}")
+            return None
+        
+        logger.info(f"Final loaded data: {len(df)} records for {token_name}, date range: {df['date'].min()} to {df['date'].max()}")
         return df
     
+    except json.JSONDecodeError as e:
+        logger.error(f"JSONDecodeError loading Tiingo cache data: {e}")
+        logger.error(f"Cache file may be corrupted: {cache_path}")
+        try:
+            with open(cache_path, 'r') as f:
+                logger.error(f"Cache content sample: {f.read()[:100]}")
+        except Exception as read_err:
+            logger.error(f"Failed to read cache content: {read_err}")
+        return None
     except Exception as e:
-        logger.error(f"Error fetching OHLCV data from OKX: {e}")
+        logger.error(f"Error loading Tiingo cache data: {e}")
         logger.error(traceback.format_exc())
         return None
 
-def load_data_from_db(token_name, limit=None):
+def calculate_zptae(y_true, y_pred, sigma=None, alpha=0.5, window_size=100):
     """
-    Load OHLCV data from SQLite database
-    
+    Menghitung Z-transformed Power-Tanh Absolute Error (ZPTAE) dengan optimasi.
     Args:
-        token_name (str): Token name (lowercase, e.g., 'berausd')
-        limit (int): Number of data points to return
-        
+        y_true (numpy.array): Nilai aktual
+        y_pred (numpy.array): Nilai prediksi
+        sigma (float, optional): Standar deviasi untuk normalisasi
+        alpha (float): Parameter power-law untuk PowerTanh (default 0.5)
+        window_size (int): Ukuran jendela untuk perhitungan std (default 100)
     Returns:
-        tuple: (prices, block_heights, timestamps, ohlcv_data) or (prices, block_heights, timestamps) for compatibility
+        float: Skor ZPTAE (lebih rendah lebih baik)
     """
-    try:
-        with sqlite3.connect(DATABASE_PATH) as conn:
-            cursor = conn.cursor()
-            
-            # Check if OHLCV columns exist
-            cursor.execute("PRAGMA table_info(prices)")
-            columns = [col[1] for col in cursor.fetchall()]
-            has_ohlcv = all(col in columns for col in ['open', 'high', 'low', 'volume'])
-            
-            if has_ohlcv:
-                # Use OHLCV format
-                query = """
-                    SELECT price, block_height, timestamp, open, high, low, volume 
-                    FROM prices 
-                    WHERE token=?
-                    ORDER BY block_height DESC
-                """
-            else:
-                # Use old format
-                query = """
-                    SELECT price, block_height, timestamp FROM prices 
-                    WHERE token=? AND timestamp IS NOT NULL
-                    ORDER BY block_height DESC
-                """
-                if 'timestamp' not in columns:
-                    query = """
-                        SELECT price, block_height FROM prices 
-                        WHERE token=?
-                        ORDER BY block_height DESC
-                    """
-            
-            if limit:
-                query += " LIMIT ?"
-                cursor.execute(query, (token_name, limit))
-            else:
-                cursor.execute(query, (token_name,))
-                
-            result = cursor.fetchall()
-            
-        if result:
-            # Convert to numpy array and reverse to get chronological order
-            data = np.array(result)
-            data = data[::-1]  # Reverse to get chronological order
-            
-            prices = data[:, 0].astype(float).reshape(-1, 1)
-            block_heights = data[:, 1]
-            
-            if has_ohlcv and data.shape[1] > 6:
-                timestamps = data[:, 2]
-                
-                # Extract OHLCV data
-                df = pd.DataFrame({
-                    'price': data[:, 0],
-                    'timestamp': data[:, 2],
-                    'open': data[:, 3],
-                    'high': data[:, 4],
-                    'low': data[:, 5],
-                    'volume': data[:, 6]
-                })
-                
-                logger.info(f"Loaded {len(prices)} OHLCV data points from database for {token_name}")
-                return prices, block_heights, timestamps, df
-            
-            elif data.shape[1] > 2:
-                timestamps = data[:, 2]
-            else:
-                timestamps = np.array([None] * len(prices))
-                
-            logger.info(f"Loaded {len(prices)} data points from database for {token_name}")
-            # For compatibility with old code
-            return prices, block_heights, timestamps
+    y_true = y_true.flatten()
+    y_pred = y_pred.flatten()
+    
+    # Pastikan length sama
+    if len(y_true) != len(y_pred):
+        min_len = min(len(y_true), len(y_pred))
+        y_true = y_true[:min_len]
+        y_pred = y_pred[:min_len]
+        logger.warning(f"y_true and y_pred length mismatch, using first {min_len} elements")
+    
+    abs_errors = np.abs(y_true - y_pred)
+    abs_errors = np.clip(abs_errors, 0, np.percentile(abs_errors, 99))  # Batasi outlier
+    n = len(abs_errors)
+    zptae_values = np.zeros(n)
+    
+    # Jika sigma diberikan, gunakan untuk seluruh data
+    if sigma is not None:
+        sigma_i = sigma
+        for i in range(n):
+            z_error = abs_errors[i] / sigma_i
+            zptae_values[i] = np.sign(z_error) * np.tanh(np.power(np.abs(z_error), alpha))
+        return np.mean(zptae_values)
+    
+    # Hitung standar deviasi bergerak
+    for i in range(n):
+        start = max(0, i - window_size + 1)
+        window = y_true[start:i+1]  # Ambil jendela data aktual
+        if len(window) > 1:
+            sigma_i = np.std(window)
         else:
-            logger.warning(f"No data found in database for {token_name}")
-            return None, None, None
-    except Exception as e:
-        logger.error(f"Error loading data from database: {e}")
-        logger.error(traceback.format_exc())
-        return None, None, None
+            sigma_i = 1e-8  # Nilai kecil untuk menghindari pembagian nol
         
-def prepare_features_for_prediction(df, scaler):
-       """
-       Menyiapkan fitur untuk prediksi model log-return dengan 17 fitur standar
-       
-       Args:
-           df (DataFrame): Data OHLCV yang sudah diurutkan berdasarkan timestamp
-           scaler (MinMaxScaler): Scaler yang sudah di-fit pada data training
-           
-       Returns:
-           numpy.array: Array fitur yang telah di-scale (17 fitur)
-       """
-       try:
-           logger.info(f"Menyiapkan fitur prediksi dari {len(df)} titik data")
-           
-           # Pastikan semua kolom yang diperlukan ada
-           required_cols = ['price', 'open', 'high', 'low']
-           missing_cols = [col for col in required_cols if col not in df.columns]
-           if missing_cols:
-               logger.warning(f"Kolom yang diperlukan tidak ada: {missing_cols}")
-               if 'price' in df.columns:
-                   for col in missing_cols:
-                       if col != 'price':
-                           df[col] = df['price']
-               else:
-                   logger.error("Tidak dapat menyiapkan fitur: kolom 'price' tidak ada")
-                   return None
-           
-           # Persiapkan fitur teknikal (sama seperti di prepare_data_for_log_return)
-           # 1. Price range
-           df['price_range'] = df['high'] - df['low']
-           
-           # 2. Body size
-           df['body_size'] = abs(df['price'] - df['open'])
-           
-           # 3. Price position
-           df['price_position'] = (df['price'] - df['low']) / df['price_range'].replace(0, 1)
-           
-           # 4. Normalized volume
-           if 'volume' in df.columns:
-               df['norm_volume'] = df['volume'] / df['volume'].rolling(window=20, min_periods=1).mean()
-           else:
-               df['norm_volume'] = 0.0
-           
-           # 5. Simple Moving Averages
-           df['sma_5'] = df['price'].rolling(window=5, min_periods=1).mean()
-           df['sma_10'] = df['price'].rolling(window=10, min_periods=1).mean()
-           df['sma_20'] = df['price'].rolling(window=20, min_periods=1).mean()
-           
-           # 6. Distance from SMAs
-           df['dist_sma_5'] = (df['price'] - df['sma_5']) / df['price']
-           df['dist_sma_10'] = (df['price'] - df['sma_10']) / df['price']
-           df['dist_sma_20'] = (df['price'] - df['sma_20']) / df['price']
-           
-           # 7. Momentum
-           df['momentum_5'] = df['price'].pct_change(periods=5)
-           df['momentum_10'] = df['price'].pct_change(periods=10)
-           df['momentum_20'] = df['price'].pct_change(periods=20)
-           
-           # Isi NaN values
-           df.fillna(0, inplace=True)
-           
-           # Daftar fitur yang sama seperti saat training
-           feature_columns = [
-               'price', 'open', 'high', 'low', 'price_range',
-               'body_size', 'price_position', 'norm_volume',
-               'sma_5', 'dist_sma_5', 'sma_10', 'dist_sma_10',
-               'sma_20', 'dist_sma_20', 'momentum_5',
-               'momentum_10', 'momentum_20'
-           ]
-           
-           # Ambil baris terakhir (data terbaru)
-           latest_features = df.iloc[-1][feature_columns].values.reshape(1, -1)
-           
-           # Terapkan scaling yang sama dengan training
-           scaled_features = scaler.transform(latest_features)
-           
-           logger.info(f"Berhasil menyiapkan fitur prediksi dengan shape: {scaled_features.shape}")
-           return scaled_features
-       
-       except Exception as e:
-           logger.error(f"Error menyiapkan fitur prediksi: {str(e)}")
-           logger.error(traceback.format_exc())
-           return None
-
-def prepare_data_for_lstm(df, look_back, prediction_horizon, feature_cols=None):
-    """
-    Menyiapkan data untuk model LSTM
+        if sigma_i < 1e-8:
+            sigma_i = 1e-8
+            
+        z_error = abs_errors[i] / sigma_i
+        zptae_values[i] = np.sign(z_error) * np.tanh(np.power(np.abs(z_error), alpha))
     
+    return np.mean(zptae_values)
+
+def smooth_predictions(preds, alpha=0.1):
+    """
+    Exponential Moving Average (EMA) smoothing untuk prediksi
     Args:
-        df (DataFrame): Data OHLCV dengan minimal kolom 'price' dan 'timestamp'
-        look_back (int): Jumlah time steps untuk melihat ke belakang
-        prediction_horizon (int): Jarak prediksi (dalam time steps)
-        feature_cols (list): Daftar kolom fitur untuk digunakan, default None
-        
+        preds (numpy.array): Prediksi untuk dihaluskan
+        alpha (float): Faktor smoothing (0-1)
     Returns:
-        tuple: (X, y, scaler, timestamps) 
-               X = fitur untuk model, 
-               y = target, 
-               scaler = scaler yang digunakan, 
-               timestamps = timestamps untuk data
+        numpy.array: Prediksi yang dihaluskan
+    """    
+    smoothed = [preds[0]]
+    for p in preds[1:]:
+        smoothed.append(alpha * p + (1 - alpha) * smoothed[-1])
+    return np.array(smoothed)
+
+def create_features_for_inference(df):
+    """
+    Membuat fitur untuk inference yang konsisten dengan training
+    PERBAIKAN: Gunakan fungsi yang sama dengan training
+    """
+    df_temp = df.copy()
+    
+    # Gunakan .shift() untuk semua fitur momentum untuk menghindari lookahead bias
+    df_temp['returns_1'] = df_temp['close'].pct_change(1)
+    df_temp['returns_5'] = df_temp['close'].pct_change(5)
+    df_temp['returns_10'] = df_temp['close'].pct_change(10)
+    
+    # Technical indicators dengan min_periods=1 untuk handle edge cases
+    # MACD
+    ema8 = df_temp['close'].ewm(span=8, adjust=False, min_periods=1).mean()
+    ema21 = df_temp['close'].ewm(span=21, adjust=False, min_periods=1).mean()
+    df_temp['macd_line'] = ema8 - ema21
+    df_temp['macd_signal'] = df_temp['macd_line'].ewm(span=14, adjust=False, min_periods=1).mean()
+    df_temp['macd_histogram'] = df_temp['macd_line'] - df_temp['macd_signal']
+    
+    # RSI
+    delta = df_temp['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
+    rs = gain / (loss + 1e-10)
+    df_temp['rsi'] = 100 - (100 / (1 + rs))
+    
+    # Bollinger Bands
+    sma20 = df_temp['close'].rolling(window=20, min_periods=1).mean()
+    std20 = df_temp['close'].rolling(window=20, min_periods=1).std()
+    df_temp['bb_upper'] = sma20 + (std20 * 2)
+    df_temp['bb_lower'] = sma20 - (std20 * 2)
+    df_temp['bb_percent'] = (df_temp['close'] - df_temp['bb_lower']) / (df_temp['bb_upper'] - df_temp['bb_lower'] + 1e-10)
+    
+    # Volume indicators
+    df_temp['volume_ma'] = df_temp['volume'].rolling(window=20, min_periods=1).mean()
+    df_temp['volume_ratio'] = df_temp['volume'] / (df_temp['volume_ma'] + 1e-10)
+    
+    # Volatility
+    df_temp['volatility_20'] = df_temp['close'].rolling(window=20, min_periods=1).std()
+    
+    # Handle NaN values dengan nilai netral
+    df_temp['rsi'] = df_temp['rsi'].fillna(50)
+    df_temp['bb_percent'] = df_temp['bb_percent'].fillna(0.5)
+    df_temp['macd_line'] = df_temp['macd_line'].fillna(0)
+    df_temp['macd_signal'] = df_temp['macd_signal'].fillna(0)
+    df_temp['macd_histogram'] = df_temp['macd_histogram'].fillna(0)
+    df_temp['returns_1'] = df_temp['returns_1'].fillna(0)
+    df_temp['returns_5'] = df_temp['returns_5'].fillna(0)
+    df_temp['returns_10'] = df_temp['returns_10'].fillna(0)
+    df_temp['volatility_20'] = df_temp['volatility_20'].fillna(0)
+    df_temp['volume_ratio'] = df_temp['volume_ratio'].fillna(1)
+    
+    # Remove temporary columns
+    if 'volume_ma' in df_temp.columns:
+        df_temp = df_temp.drop(['volume_ma'], axis=1)
+    
+    # Final cleaning
+    df_temp = df_temp.ffill().bfill()
+    
+    return df_temp
+
+def prepare_features_for_prediction(df, look_back=60, scaler=None, model_type=None):
+    """
+    Menyiapkan fitur untuk prediksi model log-return
+    PERBAIKAN: Gunakan feature engineering yang konsisten dengan training
     """
     try:
-        logger.info(f"Preparing data for LSTM with look_back={look_back}, prediction_horizon={prediction_horizon}")
+        logger.info(f"Menyiapkan fitur prediksi dari {len(df)} titik data")
         
-        # Jika tidak ada kolom fitur yang ditentukan, gunakan harga saja
-        if feature_cols is None:
-            feature_cols = ['price']
+        # PERBAIKAN: Gunakan fungsi feature engineering yang sama dengan training
+        df = create_features_for_inference(df)
         
-        # Pastikan df diurutkan berdasarkan timestamp
-        df = df.sort_values('timestamp').reset_index(drop=True)
-        
-        # Ambil kolom fitur dan nilai target
-        data = df[feature_cols].values
-        
-        # Buat array untuk X dan y
-        X = []
-        y = []
-        timestamps = []
-        
-        # Untuk setiap time step yang cukup untuk look back dan prediction horizon
-        for i in range(len(data) - look_back - prediction_horizon):
-            # Ambil look_back data points
-            X.append(data[i:(i + look_back)])
-            # Target adalah prediction_horizon time steps ke depan
-            y.append(data[i + look_back + prediction_horizon - 1][0])  # Asumsi target adalah kolom pertama (price)
-            # Simpan timestamp untuk data ini
-            timestamps.append(df['timestamp'].iloc[i + look_back])
-        
-        # Konversi ke numpy arrays
-        X = np.array(X)
-        y = np.array(y)
-        timestamps = np.array(timestamps)
-        
-        logger.info(f"Prepared LSTM data: X shape = {X.shape}, y shape = {y.shape}")
-        
-        # Untuk LSTM, reshape X ke [samples, time_steps, features]
-        if len(X.shape) == 2:
-            X = X.reshape((X.shape[0], X.shape[1], 1))
-        
-        return X, y, None, timestamps
-        
-    except Exception as e:
-        logger.error(f"Error preparing data for LSTM: {e}")
-        logger.error(traceback.format_exc())
-        return None, None, None, None
-
-def prepare_data_for_log_return(df, look_back, prediction_horizon):
-    """
-    Menyiapkan data untuk model log-return (XGBoost/Random Forest)
-    dengan 17 fitur teknikal standar
-    
-    Args:
-        df (DataFrame): Data OHLCV dengan minimal kolom 'price', 'open', 'high', 'low', 'volume', 'timestamp'
-        look_back (int): Jumlah time steps untuk melihat ke belakang
-        prediction_horizon (int): Jarak prediksi (dalam time steps)
-        
-    Returns:
-        tuple: (X, y, scaler, timestamps)
-               X = fitur untuk model (17 fitur teknikal), 
-               y = target (future log return), 
-               scaler = MinMaxScaler yang digunakan,
-               timestamps = timestamps untuk data
-    """
-    try:
-        logger.info(f"Preparing data for log-return model with look_back={look_back}, prediction_horizon={prediction_horizon}")
-        
-        # Pastikan df diurutkan berdasarkan timestamp
-        df = df.sort_values('timestamp').reset_index(drop=True)
-        
-        # Daftar fitur yang akan digunakan
+        # Daftar fitur yang konsisten dengan training - HARUS SAMA PERSIS!
         feature_columns = [
-            'price', 'open', 'high', 'low', 'price_range',
-            'body_size', 'price_position', 'norm_volume',
-            'sma_5', 'dist_sma_5', 'sma_10', 'dist_sma_10',
-            'sma_20', 'dist_sma_20', 'momentum_5',
-            'momentum_10', 'momentum_20'
+            'close', 'open', 'high', 'low', 'volume',
+            'macd_line', 'macd_signal', 'macd_histogram',
+            'rsi', 'bb_percent', 'volume_ratio',
+            'returns_1', 'returns_5', 'returns_10',
+            'volatility_20'
         ]
-
-        # Buat fitur teknikal
-        # 1. Price range (high - low)
-        df['price_range'] = df['high'] - df['low']
         
-        # 2. Body size (close - open) abs value
-        df['body_size'] = abs(df['price'] - df['open'])
+        # Pastikan semua fitur ada di DataFrame
+        for col in feature_columns:
+            if col not in df.columns:
+                logger.warning(f"Feature {col} not found, creating with default value")
+                if col in ['rsi']:
+                    df[col] = 50  # Neutral value for RSI
+                elif col in ['bb_percent']:
+                    df[col] = 0.5  # Middle of Bollinger Bands
+                elif col in ['volume_ratio']:
+                    df[col] = 1.0  # Normal volume
+                else:
+                    df[col] = 0.0  # Default for other features
         
-        # 3. Price position in range (0 = bottom, 1 = top)
-        df['price_position'] = (df['price'] - df['low']) / df['price_range'].replace(0, 1)
+        # Penanganan nilai tak hingga dan NaN
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df = df.ffill().bfill()
         
-        # 4. Normalized volume
-        if 'volume' in df.columns:
-            df['norm_volume'] = df['volume'] / df['volume'].rolling(window=20, min_periods=1).mean()
+        if df.isna().any().any():
+            logger.error(f"Masih terdapat NaN values setelah pembersihan: {df.columns[df.isna().any()].tolist()}")
+            return None
+        
+        # Ambil jendela fitur terakhir
+        if len(df) < look_back:
+            logger.error(f"Data tidak cukup untuk look_back: {len(df)} < {look_back}")
+            return None
+            
+        feature_window = df.iloc[-look_back:][feature_columns]
+        
+        if model_type in ['xgb', 'lgbm']:
+            # FLATTEN fitur untuk tree-based models - HARUS SAMA DENGAN TRAINING!
+            flattened_features = feature_window.values.flatten().reshape(1, -1)
+            
+            # Verifikasi dimensi
+            expected_features = look_back * len(feature_columns)
+            if flattened_features.shape[1] != expected_features:
+                logger.error(f"Dimensi fitur tidak sesuai: {flattened_features.shape[1]} vs {expected_features}")
+                return None
+            
+            if scaler:
+                try:
+                    # Pastikan scaler memiliki jumlah fitur yang sesuai
+                    if hasattr(scaler, 'n_features_in_') and scaler.n_features_in_ != expected_features:
+                        logger.error(f"Scaler expects {scaler.n_features_in_} features, but we have {expected_features}")
+                        return None
+                    
+                    features = scaler.transform(flattened_features)
+                    logger.info(f"Features scaled successfully, shape: {features.shape}")
+                except Exception as e:
+                    logger.error(f"Error scaling features: {e}")
+                    return None
+            else:
+                features = flattened_features
+                logger.info(f"Using unscaled features, shape: {features.shape}")
+                
+            return features
+        
         else:
-            df['norm_volume'] = 0.0
-        
-        # 5. Simple Moving Averages
-        df['sma_5'] = df['price'].rolling(window=5, min_periods=1).mean()
-        df['sma_10'] = df['price'].rolling(window=10, min_periods=1).mean()
-        df['sma_20'] = df['price'].rolling(window=20, min_periods=1).mean()
-        
-        # 6. Distance from SMAs
-        df['dist_sma_5'] = (df['price'] - df['sma_5']) / df['price']
-        df['dist_sma_10'] = (df['price'] - df['sma_10']) / df['price']
-        df['dist_sma_20'] = (df['price'] - df['sma_20']) / df['price']
-        
-        # 7. Momentum
-        df['momentum_5'] = df['price'].pct_change(periods=5)
-        df['momentum_10'] = df['price'].pct_change(periods=10)
-        df['momentum_20'] = df['price'].pct_change(periods=20)
-        
-        # Isi NaN values
-        df.fillna(0, inplace=True)
-        
-        # Ambil fitur dan timestamps
-        features = df[feature_columns].values
-        timestamps = df['timestamp'].values
-        prices = df['price'].values
-        
-        # Buat array untuk X dan y
-        X = []
-        y = []
-        ts = []
-        
-        # Untuk setiap time step yang cukup untuk prediction horizon
-        for i in range(len(features) - prediction_horizon):
-            # Ambil fitur saat ini
-            X.append(features[i])
-            
-            # Target adalah log-return dari harga saat ini ke harga di masa depan
-            future_log_return = np.log(prices[i + prediction_horizon] / prices[i])
-            y.append(future_log_return)
-            
-            # Simpan timestamp
-            ts.append(timestamps[i])
-        
-        # Konversi ke numpy arrays
-        X = np.array(X)
-        y = np.array(y)
-        ts = np.array(ts)
-        
-        # Buat dan fit scaler
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        X_scaled = scaler.fit_transform(X)
-        
-        logger.info(f"Prepared log-return data with 17 features: X shape = {X_scaled.shape}, y shape = {y.shape}")
-        
-        return X_scaled, y, scaler, ts
-
+            logger.error(f"Model type {model_type} tidak didukung")
+            return None
+    
     except Exception as e:
-        logger.error(f"Error preparing log-return data: {str(e)}")
+        logger.error(f"Error menyiapkan fitur prediksi: {str(e)}")
         logger.error(traceback.format_exc())
-        return None, None, None, None
+        return None
